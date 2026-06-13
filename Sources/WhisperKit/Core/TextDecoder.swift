@@ -195,7 +195,7 @@ public extension TextDecoding {
             prefillTokens.append(timestampsToken)
 
             // Add prompt tokens
-            if let promptTokens = options.promptTokens {
+            if let promptTokens = options.promptTokens, !promptTokens.isEmpty {
                 let maxPromptLen = (Constants.maxTokenContext / 2) - 1
                 let trimmedPromptTokens = Array(promptTokens.suffix(maxPromptLen)).filter { $0 < tokenizer.specialTokens.specialTokenBegin }
                 prefillTokens = [tokenizer.specialTokens.startOfPreviousToken] + trimmedPromptTokens + prefillTokens
