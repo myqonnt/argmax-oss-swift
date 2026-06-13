@@ -53,6 +53,10 @@ public struct SimulStreamingUpdate: Sendable {
     public var words: [SimulStreamingWord]
     public var isFinal: Bool
     public var noSpeechProb: Float?
+    public var stopReason: StreamingDecodingResult.StopReason?
+    public var lastSampledToken: Int?
+    public var lastSampledLogProb: Float?
+    public var lastSampledFrame: Int?
 
     public init(
         start: Float? = nil,
@@ -61,7 +65,11 @@ public struct SimulStreamingUpdate: Sendable {
         tokens: [Int] = [],
         words: [SimulStreamingWord] = [],
         isFinal: Bool = false,
-        noSpeechProb: Float? = nil
+        noSpeechProb: Float? = nil,
+        stopReason: StreamingDecodingResult.StopReason? = nil,
+        lastSampledToken: Int? = nil,
+        lastSampledLogProb: Float? = nil,
+        lastSampledFrame: Int? = nil
     ) {
         self.start = start
         self.end = end
@@ -70,6 +78,10 @@ public struct SimulStreamingUpdate: Sendable {
         self.words = words
         self.isFinal = isFinal
         self.noSpeechProb = noSpeechProb
+        self.stopReason = stopReason
+        self.lastSampledToken = lastSampledToken
+        self.lastSampledLogProb = lastSampledLogProb
+        self.lastSampledFrame = lastSampledFrame
     }
 }
 
@@ -88,6 +100,15 @@ public struct StreamingTokenPrediction: Sendable {
 }
 
 public struct StreamingDecodingResult: Sendable {
+    public enum StopReason: String, Sendable {
+        case sampleLength
+        case noSpeech
+        case endToken
+        case nearAudioEnd
+        case rewind
+        case callback
+    }
+
     public var tokens: [Int]
     public var tokenLogProbs: [Float]
     public var tokenFrames: [Int]
@@ -96,6 +117,10 @@ public struct StreamingDecodingResult: Sendable {
     public var stoppedNearAudioEnd: Bool
     public var lastAttendedFrame: Int?
     public var noSpeechProb: Float?
+    public var stopReason: StopReason
+    public var lastSampledToken: Int?
+    public var lastSampledLogProb: Float?
+    public var lastSampledFrame: Int?
 
     public init(
         tokens: [Int],
@@ -105,7 +130,11 @@ public struct StreamingDecodingResult: Sendable {
         completed: Bool,
         stoppedNearAudioEnd: Bool,
         lastAttendedFrame: Int? = nil,
-        noSpeechProb: Float? = nil
+        noSpeechProb: Float? = nil,
+        stopReason: StopReason = .sampleLength,
+        lastSampledToken: Int? = nil,
+        lastSampledLogProb: Float? = nil,
+        lastSampledFrame: Int? = nil
     ) {
         self.tokens = tokens
         self.tokenLogProbs = tokenLogProbs
@@ -115,5 +144,9 @@ public struct StreamingDecodingResult: Sendable {
         self.stoppedNearAudioEnd = stoppedNearAudioEnd
         self.lastAttendedFrame = lastAttendedFrame
         self.noSpeechProb = noSpeechProb
+        self.stopReason = stopReason
+        self.lastSampledToken = lastSampledToken
+        self.lastSampledLogProb = lastSampledLogProb
+        self.lastSampledFrame = lastSampledFrame
     }
 }

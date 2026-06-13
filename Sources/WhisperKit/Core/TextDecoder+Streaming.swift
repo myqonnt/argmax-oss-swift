@@ -62,6 +62,10 @@ public extension TextDecoder {
         var stoppedNearAudioEnd = false
         var lastAcceptedFrame = lastAttendedFrame
         var noSpeechProb: Float?
+        var stopReason: StreamingDecodingResult.StopReason = .sampleLength
+        var lastSampledToken: Int?
+        var lastSampledLogProb: Float?
+        var lastSampledFrame: Int?
 
         let loopCount = min(options.sampleLength, Constants.maxTokenContext - 1)
         for tokenIndex in prefilledIndex..<loopCount {
@@ -107,7 +111,8 @@ public extension TextDecoder {
                         completed: true,
                         stoppedNearAudioEnd: false,
                         lastAttendedFrame: lastAcceptedFrame,
-                        noSpeechProb: noSpeechProb
+                        noSpeechProb: noSpeechProb,
+                        stopReason: .noSpeech
                     )
                 }
             }
@@ -120,6 +125,8 @@ public extension TextDecoder {
             nextToken = sampleResult.tokens.last!
             let nextTokenLogProb = sampleResult.logProbs.last!
             completed = sampleResult.completed
+            lastSampledToken = nextToken
+            lastSampledLogProb = nextTokenLogProb
 
             guard let decoderCache = decoderOutput.cache,
                   let newKeyCache = decoderCache.keyCache,
@@ -145,7 +152,11 @@ public extension TextDecoder {
                     "Streaming decoding requires decoder models that output alignment_heads_weights."
                 )
             }
-            let mostAttendedFrame = Self.mostAttendedFrame(in: newAlignmentWeights)
+            let mostAttendedFrame = Self.mostAttendedFrame(
+                in: newAlignmentWeights,
+                maxFrameCount: contentFrameCount
+            )
+            lastSampledFrame = mostAttendedFrame
             TextDecoder.updateAlignmentWeights(
                 alignmentTensor: decoderInputs.alignmentWeights,
                 alignmentSlice: newAlignmentWeights,
@@ -153,6 +164,7 @@ public extension TextDecoder {
             )
 
             if completed {
+                stopReason = .endToken
                 break
             }
 
@@ -164,12 +176,14 @@ public extension TextDecoder {
                     if currentTokens.last ?? 0 >= tokenizer.specialTokens.specialTokenBegin {
                         lastAcceptedFrame = mostAttendedFrame
                     } else {
+                        stopReason = .rewind
                         break
                     }
                 }
 
                 if contentFrameCount - mostAttendedFrame <= frameThreshold {
                     stoppedNearAudioEnd = true
+                    stopReason = .nearAudioEnd
                     break
                 }
 
@@ -187,6 +201,7 @@ public extension TextDecoder {
                     completed: completed
                 )
                 if let shouldContinue = callback?(prediction), !shouldContinue {
+                    stopReason = .callback
                     break
                 }
             }
@@ -201,7 +216,11 @@ public extension TextDecoder {
             completed: completed,
             stoppedNearAudioEnd: stoppedNearAudioEnd,
             lastAttendedFrame: lastAcceptedFrame,
-            noSpeechProb: noSpeechProb
+            noSpeechProb: noSpeechProb,
+            stopReason: stopReason,
+            lastSampledToken: lastSampledToken,
+            lastSampledLogProb: lastSampledLogProb,
+            lastSampledFrame: lastSampledFrame
         )
     }
 
@@ -227,27 +246,34 @@ public extension TextDecoder {
         return exp(Float(pointer[token]) - maxLogit) / denominator
     }
 
-    private static func mostAttendedFrame(in alignmentWeights: MLMultiArray) -> Int {
+    internal static func mostAttendedFrame(in alignmentWeights: MLMultiArray, maxFrameCount: Int) -> Int {
         guard alignmentWeights.count > 0 else {
             return 0
         }
+        let shape = alignmentWeights.shape.map(\.intValue)
+        guard let lastDimension = shape.last, lastDimension > 0 else {
+            return 0
+        }
+        let boundedFrameCount = min(max(maxFrameCount, 1), lastDimension)
 
         let pointer = alignmentWeights.dataPointer.assumingMemoryBound(to: FloatType.self)
-        var bestIndex = 0
-        var bestValue = Float(pointer[0])
+        var bestFrame = 0
+        var bestValue = -Float.infinity
 
-        for index in 1..<alignmentWeights.count {
+        for index in 0..<alignmentWeights.count {
+            let frame = index % lastDimension
+            guard frame < boundedFrameCount else {
+                continue
+            }
             let value = Float(pointer[index])
             if value > bestValue {
                 bestValue = value
-                bestIndex = index
+                bestFrame = frame
             }
         }
-
-        let shape = alignmentWeights.shape.map(\.intValue)
-        guard let lastDimension = shape.last, lastDimension > 0 else {
-            return bestIndex
+        if bestValue == -Float.infinity {
+            return 0
         }
-        return bestIndex % lastDimension
+        return bestFrame
     }
 }

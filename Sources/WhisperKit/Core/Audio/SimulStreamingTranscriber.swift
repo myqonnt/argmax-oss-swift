@@ -140,7 +140,11 @@ public final class SimulStreamingTranscriber {
         guard !tokens.isEmpty else {
             return SimulStreamingUpdate(
                 isFinal: isFinal && result.completed,
-                noSpeechProb: result.noSpeechProb
+                noSpeechProb: result.noSpeechProb,
+                stopReason: result.stopReason,
+                lastSampledToken: result.lastSampledToken,
+                lastSampledLogProb: result.lastSampledLogProb,
+                lastSampledFrame: result.lastSampledFrame
             )
         }
 
@@ -159,7 +163,11 @@ public final class SimulStreamingTranscriber {
             tokens: tokens,
             words: words,
             isFinal: isFinal,
-            noSpeechProb: result.noSpeechProb
+            noSpeechProb: result.noSpeechProb,
+            stopReason: result.stopReason,
+            lastSampledToken: result.lastSampledToken,
+            lastSampledLogProb: result.lastSampledLogProb,
+            lastSampledFrame: result.lastSampledFrame
         )
     }
 

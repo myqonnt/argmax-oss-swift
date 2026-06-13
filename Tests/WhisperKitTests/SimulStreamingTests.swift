@@ -63,6 +63,12 @@ final class SimulStreamingTests: XCTestCase {
         )
     }
 
+    func testMostAttendedFrameIgnoresPaddedFrames() throws {
+        let weights = try MLMultiArray.logits([0.1, 0.2, 0.7, 3.0, 4.0])
+
+        XCTAssertEqual(TextDecoder.mostAttendedFrame(in: weights, maxFrameCount: 3), 2)
+    }
+
     func testLimitedContextTokensUsesSuffix() {
         XCTAssertEqual(
             SimulStreamingTranscriber.limitedContextTokens([1, 2, 3, 4], maxContextTokens: 2),
