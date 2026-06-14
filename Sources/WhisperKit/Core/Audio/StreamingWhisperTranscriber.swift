@@ -17,6 +17,7 @@ public struct StreamingDecodingOptions: Sendable {
     public var audioMaxSeconds: Float
     public var holdBackWords: Int
     public var promptTokenLimit: Int
+    public var alignmentFrameMargin: Int
     public var confirmationMode: StreamingConfirmationMode
     public var decodingOptions: DecodingOptions
 
@@ -26,6 +27,7 @@ public struct StreamingDecodingOptions: Sendable {
         audioMaxSeconds: Float = 28.0,
         holdBackWords: Int = 1,
         promptTokenLimit: Int = 224,
+        alignmentFrameMargin: Int = 25,
         confirmationMode: StreamingConfirmationMode = .localAgreement(rounds: 2),
         decodingOptions: DecodingOptions = DecodingOptions(wordTimestamps: true)
     ) {
@@ -34,6 +36,7 @@ public struct StreamingDecodingOptions: Sendable {
         self.audioMaxSeconds = audioMaxSeconds
         self.holdBackWords = holdBackWords
         self.promptTokenLimit = promptTokenLimit
+        self.alignmentFrameMargin = alignmentFrameMargin
         self.confirmationMode = confirmationMode
         self.decodingOptions = decodingOptions
         self.decodingOptions.wordTimestamps = true
@@ -207,11 +210,9 @@ public actor StreamingWhisperTranscriber {
             case let .localAgreement(rounds):
                 return confirmWithLocalAgreement(words, rounds: rounds)
             case .alignmentAttention:
-                Logging.debug("Streaming alignment-attention confirmation is not implemented yet; using local agreement.")
-                return confirmWithLocalAgreement(words, rounds: 2)
+                return confirmWithAlignmentAttention(words)
             case .hybrid:
-                Logging.debug("Streaming hybrid confirmation is not implemented yet; using local agreement.")
-                return confirmWithLocalAgreement(words, rounds: 2)
+                return confirmWithHybrid(words)
         }
     }
 
@@ -221,6 +222,25 @@ public actor StreamingWhisperTranscriber {
             holdBackWords: options.holdBackWords,
             agreementRounds: rounds
         )
+    }
+
+    private func confirmWithAlignmentAttention(_ words: [StreamingWord]) -> [StreamingWord] {
+        hypothesisBuffer.insert(words)
+        return hypothesisBuffer.flushStablePrefix(
+            until: alignmentStableEndTime(),
+            holdBackWords: options.holdBackWords
+        )
+    }
+
+    private func confirmWithHybrid(_ words: [StreamingWord]) -> [StreamingWord] {
+        let stableWords = words.filter { $0.end <= alignmentStableEndTime() }
+        return confirmWithLocalAgreement(stableWords, rounds: 2)
+    }
+
+    private func alignmentStableEndTime() -> Double {
+        let audioEnd = audioOffsetSeconds + Double(audioBuffer.count) / Double(WhisperKit.sampleRate)
+        let margin = Double(max(0, options.alignmentFrameMargin)) * Double(WhisperKit.secondsPerTimeToken)
+        return audioEnd - margin
     }
 
     private func makePromptTokens() -> [Int]? {
@@ -385,6 +405,25 @@ private struct StreamingLocalAgreementBuffer: Sendable {
         let maxHistoryCount = max(1, requiredRounds - 1)
         if hypothesisHistory.count > maxHistoryCount {
             hypothesisHistory = Array(hypothesisHistory.suffix(maxHistoryCount))
+        }
+        return commit
+    }
+
+    mutating func flushStablePrefix(until stableEndTime: Double, holdBackWords: Int) -> [StreamingWord] {
+        guard let latest = hypothesisHistory.last else { return [] }
+
+        let stablePrefixCount = latest.prefix { $0.end <= stableEndTime }.count
+        let committableCount = max(0, stablePrefixCount - max(0, holdBackWords))
+        let commit = Array(latest.prefix(committableCount))
+
+        for word in commit {
+            lastCommittedTime = word.end
+        }
+        committedInBuffer.append(contentsOf: commit)
+
+        hypothesisHistory = hypothesisHistory.map { Array($0.dropFirst(commit.count)) }
+        if hypothesisHistory.count > 1 {
+            hypothesisHistory = Array(hypothesisHistory.suffix(1))
         }
         return commit
     }
