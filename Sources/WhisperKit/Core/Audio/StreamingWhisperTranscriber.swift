@@ -135,8 +135,7 @@ public actor StreamingWhisperTranscriber {
         pendingAudioSeconds = 0
 
         let words = try await transcribeCurrentBuffer()
-        hypothesisBuffer.insert(words)
-        let committed = hypothesisBuffer.flush(holdBackWords: options.holdBackWords)
+        let committed = confirm(words)
         updateUnconfirmedSegments()
 
         guard !committed.isEmpty else {
@@ -201,6 +200,27 @@ public actor StreamingWhisperTranscriber {
             )
         }
         return filterRepetitiveWords(words)
+    }
+
+    private func confirm(_ words: [StreamingWord]) -> [StreamingWord] {
+        switch options.confirmationMode {
+            case let .localAgreement(rounds):
+                return confirmWithLocalAgreement(words, rounds: rounds)
+            case .alignmentAttention:
+                Logging.debug("Streaming alignment-attention confirmation is not implemented yet; using local agreement.")
+                return confirmWithLocalAgreement(words, rounds: 2)
+            case .hybrid:
+                Logging.debug("Streaming hybrid confirmation is not implemented yet; using local agreement.")
+                return confirmWithLocalAgreement(words, rounds: 2)
+        }
+    }
+
+    private func confirmWithLocalAgreement(_ words: [StreamingWord], rounds: Int) -> [StreamingWord] {
+        hypothesisBuffer.insert(words)
+        return hypothesisBuffer.flush(
+            holdBackWords: options.holdBackWords,
+            agreementRounds: rounds
+        )
     }
 
     private func makePromptTokens() -> [Int]? {
@@ -329,8 +349,7 @@ private struct StreamingWord: Equatable, Sendable {
 
 private struct StreamingLocalAgreementBuffer: Sendable {
     private var committedInBuffer: [StreamingWord] = []
-    private var previousHypothesis: [StreamingWord] = []
-    private var currentHypothesis: [StreamingWord] = []
+    private var hypothesisHistory: [[StreamingWord]] = []
     private var lastCommittedTime: Double
 
     init(offset: Double = 0) {
@@ -338,12 +357,21 @@ private struct StreamingLocalAgreementBuffer: Sendable {
     }
 
     mutating func insert(_ words: [StreamingWord]) {
-        currentHypothesis = words.filter { $0.start > lastCommittedTime - 0.1 }
+        hypothesisHistory.append(words.filter { $0.start > lastCommittedTime - 0.1 })
         removeDuplicatePrefixNearCommitBoundary()
     }
 
-    mutating func flush(holdBackWords: Int) -> [StreamingWord] {
-        let common = Self.longestCommonPrefix(previousHypothesis, currentHypothesis)
+    mutating func flush(holdBackWords: Int, agreementRounds: Int = 2) -> [StreamingWord] {
+        let requiredRounds = max(1, agreementRounds)
+        let common: [StreamingWord]
+        if requiredRounds == 1 {
+            common = hypothesisHistory.last ?? []
+        } else if hypothesisHistory.count >= requiredRounds {
+            common = Self.longestCommonPrefix(Array(hypothesisHistory.suffix(requiredRounds)))
+        } else {
+            common = []
+        }
+
         let committableCount = max(0, common.count - max(0, holdBackWords))
         let commit = Array(common.prefix(committableCount))
 
@@ -352,8 +380,12 @@ private struct StreamingLocalAgreementBuffer: Sendable {
         }
         committedInBuffer.append(contentsOf: commit)
 
-        previousHypothesis = Array(currentHypothesis.dropFirst(commit.count))
-        currentHypothesis.removeAll(keepingCapacity: true)
+        hypothesisHistory = hypothesisHistory.map { Array($0.dropFirst(commit.count)) }
+
+        let maxHistoryCount = max(1, requiredRounds - 1)
+        if hypothesisHistory.count > maxHistoryCount {
+            hypothesisHistory = Array(hypothesisHistory.suffix(maxHistoryCount))
+        }
         return commit
     }
 
@@ -362,20 +394,21 @@ private struct StreamingLocalAgreementBuffer: Sendable {
     }
 
     func unconfirmed() -> [StreamingWord] {
-        previousHypothesis
+        hypothesisHistory.last ?? []
     }
 
     func complete() -> [StreamingWord] {
-        currentHypothesis.isEmpty ? previousHypothesis : currentHypothesis
+        hypothesisHistory.last ?? []
     }
 
     private mutating func removeDuplicatePrefixNearCommitBoundary() {
-        guard let first = currentHypothesis.first,
+        guard let currentIndex = hypothesisHistory.indices.last,
+              let first = hypothesisHistory[currentIndex].first,
               abs(first.start - lastCommittedTime) < 1,
               !committedInBuffer.isEmpty
         else { return }
 
-        let maxNgram = min(min(committedInBuffer.count, currentHypothesis.count), 5)
+        let maxNgram = min(min(committedInBuffer.count, hypothesisHistory[currentIndex].count), 5)
         guard maxNgram > 0 else { return }
 
         for size in 1...maxNgram {
@@ -383,15 +416,26 @@ private struct StreamingLocalAgreementBuffer: Sendable {
                 .suffix(size)
                 .map { Self.normalizedText($0.text) }
                 .joined(separator: " ")
-            let currentHead = currentHypothesis
+            let currentHead = hypothesisHistory[currentIndex]
                 .prefix(size)
                 .map { Self.normalizedText($0.text) }
                 .joined(separator: " ")
             if committedTail == currentHead {
-                currentHypothesis.removeFirst(size)
+                hypothesisHistory[currentIndex].removeFirst(size)
                 break
             }
         }
+    }
+
+    private static func longestCommonPrefix(_ hypotheses: [[StreamingWord]]) -> [StreamingWord] {
+        guard var prefix = hypotheses.first else { return [] }
+        for hypothesis in hypotheses.dropFirst() {
+            prefix = longestCommonPrefix(prefix, hypothesis)
+            if prefix.isEmpty {
+                break
+            }
+        }
+        return prefix
     }
 
     private static func longestCommonPrefix(_ lhs: [StreamingWord], _ rhs: [StreamingWord]) -> [StreamingWord] {
