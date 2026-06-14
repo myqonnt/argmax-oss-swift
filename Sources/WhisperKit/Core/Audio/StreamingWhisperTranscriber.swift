@@ -179,8 +179,10 @@ public actor StreamingWhisperTranscriber {
 
     private func transcribeCurrentBuffer() async throws -> [StreamingWord] {
         var decodingOptions = options.decodingOptions
-        decodingOptions.wordTimestamps = true
+        applyDetectedLanguage(to: &decodingOptions)
+        decodingOptions.wordTimestamps = supportsAlignmentAttention
         decodingOptions.promptTokens = makePromptTokens()
+        decodingOptions.prefixTokens = makePrefixTokens()
         decodingOptions.alignmentEarlyStopping = usesAlignmentEarlyStopping
         decodingOptions.alignmentFrameMargin = options.alignmentFrameMargin
 
@@ -192,7 +194,8 @@ public actor StreamingWhisperTranscriber {
             detectedLanguage = language
         }
 
-        let words: [StreamingWord] = results.flatMap(\.allWords).compactMap { word in
+        let wordTimings = results.flatMap(\.allWords)
+        let words: [StreamingWord] = wordTimings.compactMap { word in
             let start = Double(word.start) + audioOffsetSeconds
             let end = Double(word.end) + audioOffsetSeconds
             guard end > start else { return nil }
@@ -204,11 +207,53 @@ public actor StreamingWhisperTranscriber {
                 probability: word.probability
             )
         }
-        return filterRepetitiveWords(words)
+
+        if !words.isEmpty {
+            return filterRepetitiveWords(words)
+        }
+
+        let segmentWords = results.flatMap(\.segments).compactMap { segment -> StreamingWord? in
+            let start = Double(segment.start) + audioOffsetSeconds
+            let end = Double(segment.end) + audioOffsetSeconds
+            let text = segment.text
+            guard end > start, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+
+            return StreamingWord(
+                start: start,
+                end: end,
+                text: text,
+                tokens: segment.tokens.filter { $0 < (whisperKit.tokenizer?.specialTokens.specialTokenBegin ?? Int.max) },
+                probability: 0
+            )
+        }
+        return filterRepetitiveWords(segmentWords)
+    }
+
+    private var supportsAlignmentAttention: Bool {
+        whisperKit.textDecoder.supportsWordTimestamps
+    }
+
+    private var effectiveConfirmationMode: StreamingConfirmationMode {
+        guard supportsAlignmentAttention else {
+            return .localAgreement(rounds: 2)
+        }
+        return options.confirmationMode
+    }
+
+    private func applyDetectedLanguage(to decodingOptions: inout DecodingOptions) {
+        guard decodingOptions.language == nil,
+              let detectedLanguage,
+              !detectedLanguage.isEmpty
+        else { return }
+
+        decodingOptions.language = detectedLanguage
+        decodingOptions.detectLanguage = false
     }
 
     private var usesAlignmentEarlyStopping: Bool {
-        switch options.confirmationMode {
+        switch effectiveConfirmationMode {
             case .localAgreement:
                 return false
             case .alignmentAttention, .hybrid:
@@ -217,7 +262,7 @@ public actor StreamingWhisperTranscriber {
     }
 
     private func confirm(_ words: [StreamingWord]) -> [StreamingWord] {
-        switch options.confirmationMode {
+        switch effectiveConfirmationMode {
             case let .localAgreement(rounds):
                 return confirmWithLocalAgreement(words, rounds: rounds)
             case .alignmentAttention:
@@ -269,6 +314,21 @@ public actor StreamingWhisperTranscriber {
             return Array((promptTokens + trimmed).suffix(options.promptTokenLimit))
         }
         return trimmed
+    }
+
+    private func makePrefixTokens() -> [Int]? {
+        guard options.promptTokenLimit > 0 else { return nil }
+
+        let inWindowTokens = committedWords
+            .filter { $0.end > audioOffsetSeconds }
+            .flatMap(\.tokens)
+            .filter { $0 < (whisperKit.tokenizer?.specialTokens.specialTokenBegin ?? Int.max) }
+
+        let existingPrefix = options.decodingOptions.prefixTokens ?? []
+        let combined = existingPrefix + inWindowTokens
+        guard !combined.isEmpty else { return nil }
+
+        return Array(combined.suffix(options.promptTokenLimit))
     }
 
     private func trimAudioBufferIfNeeded() {
