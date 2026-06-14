@@ -2244,6 +2244,44 @@ final class UnitTests: XCTestCase {
         XCTAssertEqual(jfkVadAsyc, jfkVadSync)
     }
 
+    func testVoiceActivityControlledStreamingSkipsSilence() async throws {
+        let whisperKit = try await WhisperKit(prewarm: false, load: false, download: false)
+        let transcriber = whisperKit.makeVoiceActivityControlledStreamingTranscriber(
+            vad: FixedVoiceActivityDetector(activity: [false, false], frameLengthSamples: 4),
+            options: VoiceActivityControlOptions(
+                speechPaddingSeconds: 0.1,
+                minSilenceSeconds: 0.1,
+                processDuringSpeech: false
+            )
+        )
+
+        let updates = try await transcriber.processAudioChunk(Array(repeating: 0, count: 8))
+        let state = await transcriber.state
+        let confirmedSegments = await transcriber.confirmedSegments
+
+        XCTAssertTrue(updates.isEmpty)
+        XCTAssertEqual(state, .nonVoice)
+        XCTAssertTrue(confirmedSegments.isEmpty)
+    }
+
+    func testVoiceActivityControlledStreamingEntersVoice() async throws {
+        let whisperKit = try await WhisperKit(prewarm: false, load: false, download: false)
+        let transcriber = whisperKit.makeVoiceActivityControlledStreamingTranscriber(
+            vad: FixedVoiceActivityDetector(activity: [false, true, true], frameLengthSamples: 4),
+            options: VoiceActivityControlOptions(
+                speechPaddingSeconds: 0,
+                minSilenceSeconds: 0.1,
+                processDuringSpeech: false
+            )
+        )
+
+        let updates = try await transcriber.processAudioChunk(Array(repeating: 1, count: 12))
+        let state = await transcriber.state
+
+        XCTAssertTrue(updates.isEmpty)
+        XCTAssertEqual(state, .voice)
+    }
+
     func testFindLongestSilence() throws {
         let vad = EnergyVAD()
 
@@ -3384,6 +3422,19 @@ class PlusOneFilter: LogitsFiltering {
         }
 
         return modifiedLogits
+    }
+}
+
+final class FixedVoiceActivityDetector: VoiceActivityDetector, @unchecked Sendable {
+    private let activity: [Bool]
+
+    init(activity: [Bool], frameLengthSamples: Int) {
+        self.activity = activity
+        super.init(frameLengthSamples: frameLengthSamples)
+    }
+
+    override func voiceActivity(in waveform: [Float]) -> [Bool] {
+        activity
     }
 }
 

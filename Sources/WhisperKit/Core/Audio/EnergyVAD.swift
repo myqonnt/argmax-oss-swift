@@ -4,7 +4,7 @@
 import Foundation
 
 /// Voice activity detection based on energy threshold
-public final class EnergyVAD: VoiceActivityDetector {
+public final class EnergyVAD: VoiceActivityDetector, @unchecked Sendable {
     public let energyThreshold: Float
 
     /// Initialize a new EnergyVAD instance
