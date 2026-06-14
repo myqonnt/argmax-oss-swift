@@ -19,6 +19,8 @@ public struct StreamingDecodingOptions: Sendable {
     public var promptTokenLimit: Int
     public var alignmentFrameMargin: Int
     public var alignmentRewindThreshold: Int
+    public var boundaryFrameMargin: Int
+    public var dropUnstableTrailingWord: Bool
     public var confirmationMode: StreamingConfirmationMode
     public var decodingOptions: DecodingOptions
 
@@ -30,6 +32,8 @@ public struct StreamingDecodingOptions: Sendable {
         promptTokenLimit: Int = 224,
         alignmentFrameMargin: Int = 25,
         alignmentRewindThreshold: Int = 50,
+        boundaryFrameMargin: Int? = nil,
+        dropUnstableTrailingWord: Bool = true,
         confirmationMode: StreamingConfirmationMode = .localAgreement(rounds: 2),
         decodingOptions: DecodingOptions = DecodingOptions(wordTimestamps: true)
     ) {
@@ -40,6 +44,8 @@ public struct StreamingDecodingOptions: Sendable {
         self.promptTokenLimit = promptTokenLimit
         self.alignmentFrameMargin = alignmentFrameMargin
         self.alignmentRewindThreshold = alignmentRewindThreshold
+        self.boundaryFrameMargin = boundaryFrameMargin ?? alignmentFrameMargin
+        self.dropUnstableTrailingWord = dropUnstableTrailingWord
         self.confirmationMode = confirmationMode
         self.decodingOptions = decodingOptions
         self.decodingOptions.wordTimestamps = true
@@ -149,7 +155,8 @@ public actor StreamingWhisperTranscriber {
         }
         updateLastAttendedFrame(with: words)
 
-        let committed = confirm(words)
+        let boundaryStableWords = dropUnstableTrailingWordIfNeeded(words)
+        let committed = confirm(boundaryStableWords)
         updateUnconfirmedSegments()
 
         guard !committed.isEmpty else {
@@ -345,6 +352,28 @@ public actor StreamingWhisperTranscriber {
         let audioEnd = audioOffsetSeconds + Double(audioBuffer.count) / Double(WhisperKit.sampleRate)
         let margin = Double(max(0, options.alignmentFrameMargin)) * Double(WhisperKit.secondsPerTimeToken)
         return audioEnd - margin
+    }
+
+    private func dropUnstableTrailingWordIfNeeded(_ words: [StreamingWord]) -> [StreamingWord] {
+        guard options.dropUnstableTrailingWord,
+              words.count > 1,
+              let lastWord = words.last,
+              let lastWordFrame = lastWord.alignmentFrames.max()
+        else {
+            return words
+        }
+
+        let audioEndFrame = Int(
+            (Double(audioBuffer.count) / Double(WhisperKit.sampleRate) / Double(WhisperKit.secondsPerTimeToken))
+                .rounded(.up)
+        )
+        let margin = max(0, options.boundaryFrameMargin)
+        guard audioEndFrame - lastWordFrame <= margin else {
+            return words
+        }
+
+        Logging.debug("Dropping unstable trailing word \"\(lastWord.text)\" at frame \(lastWordFrame)/\(audioEndFrame)")
+        return Array(words.dropLast())
     }
 
     private func shouldRejectForAlignmentRewind(_ words: [StreamingWord]) -> Bool {

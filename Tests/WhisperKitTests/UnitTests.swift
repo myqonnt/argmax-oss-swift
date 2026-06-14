@@ -66,9 +66,17 @@ final class UnitTests: XCTestCase {
     func testStreamingDecodingOptionsAlignmentRewindThreshold() {
         let defaultOptions = StreamingDecodingOptions()
         XCTAssertEqual(defaultOptions.alignmentRewindThreshold, 50)
+        XCTAssertEqual(defaultOptions.boundaryFrameMargin, defaultOptions.alignmentFrameMargin)
+        XCTAssertTrue(defaultOptions.dropUnstableTrailingWord)
 
-        let disabledOptions = StreamingDecodingOptions(alignmentRewindThreshold: 0)
+        let disabledOptions = StreamingDecodingOptions(
+            alignmentRewindThreshold: 0,
+            boundaryFrameMargin: 12,
+            dropUnstableTrailingWord: false
+        )
         XCTAssertEqual(disabledOptions.alignmentRewindThreshold, 0)
+        XCTAssertEqual(disabledOptions.boundaryFrameMargin, 12)
+        XCTAssertFalse(disabledOptions.dropUnstableTrailingWord)
     }
 
     func testDecodingOptionsPreservesExplicitNullThresholds() throws {
