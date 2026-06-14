@@ -162,11 +162,18 @@ open class TranscribeTask {
                     return callback(windowProgress)
                 }
 
+                var windowDecodingOptions = options
+                if windowDecodingOptions.alignmentEarlyStopping {
+                    windowDecodingOptions.alignmentContentFrameCount = Int(
+                        ceil(Float(segmentSize) / Float(WhisperKit.sampleRate) / WhisperKit.secondsPerTimeToken)
+                    )
+                }
+
                 try Task.checkCancellation()
                 // Send to decoder to predict text tokens with fallback
                 let decodingResult = try await decodeWithFallback(
                     encoderSegment: encoderOutput,
-                    decodingOptions: options,
+                    decodingOptions: windowDecodingOptions,
                     decoderInputs: &decoderInputs,
                     detectedLanguage: &detectedLanguage,
                     callback: decodingCallback

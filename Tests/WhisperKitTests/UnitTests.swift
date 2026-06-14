@@ -54,6 +54,43 @@ final class UnitTests: XCTestCase {
         XCTAssertEqual(defaultSupport.models.supported.sorted(), Constants.knownModels.sorted())
     }
 
+    func testDecodingOptionsAlignmentEarlyStoppingDefaultsWhenDecodedFromOldPayload() throws {
+        let data = Data("{}".utf8)
+        let options = try JSONDecoder().decode(DecodingOptions.self, from: data)
+
+        XCTAssertFalse(options.alignmentEarlyStopping)
+        XCTAssertEqual(options.alignmentFrameMargin, 25)
+        XCTAssertNil(options.alignmentContentFrameCount)
+    }
+
+    func testDecodingOptionsPreservesExplicitNullThresholds() throws {
+        let data = Data(#"{"compressionRatioThreshold":null,"logProbThreshold":null,"firstTokenLogProbThreshold":null,"noSpeechThreshold":null}"#.utf8)
+        let options = try JSONDecoder().decode(DecodingOptions.self, from: data)
+
+        XCTAssertNil(options.compressionRatioThreshold)
+        XCTAssertNil(options.logProbThreshold)
+        XCTAssertNil(options.firstTokenLogProbThreshold)
+        XCTAssertNil(options.noSpeechThreshold)
+    }
+
+    func testAlignmentEarlyStoppingDetectsTokenNearAudioEnd() throws {
+        let weights = try MLMultiArray(shape: [1, 10], dataType: .float32)
+        for index in 0..<weights.count {
+            weights[index] = NSNumber(value: Float(index))
+        }
+
+        XCTAssertTrue(TextDecoder.shouldStopForAlignment(
+            alignmentSlice: weights,
+            contentFrameCount: 10,
+            frameMargin: 2
+        ))
+        XCTAssertFalse(TextDecoder.shouldStopForAlignment(
+            alignmentSlice: weights,
+            contentFrameCount: 10,
+            frameMargin: 0
+        ))
+    }
+
     func testModelSupportConfigFallbackMergingFromJSON() throws {
         let sameRepoConfig = ModelSupportConfig(
             repoName: "whisperkit-coreml",

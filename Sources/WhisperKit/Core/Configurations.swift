@@ -180,6 +180,42 @@ public struct DecodingOptions: Codable, Sendable {
     public var noSpeechThreshold: Float?
     public var concurrentWorkerCount: Int
     public var chunkingStrategy: ChunkingStrategy?
+    public var alignmentEarlyStopping: Bool
+    public var alignmentFrameMargin: Int
+    public var alignmentContentFrameCount: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case verbose
+        case task
+        case language
+        case temperature
+        case temperatureIncrementOnFallback
+        case temperatureFallbackCount
+        case sampleLength
+        case topK
+        case usePrefillPrompt
+        case detectLanguage
+        case skipSpecialTokens
+        case withoutTimestamps
+        case wordTimestamps
+        case maxInitialTimestamp
+        case maxWindowSeek
+        case clipTimestamps
+        case windowClipTime
+        case promptTokens
+        case prefixTokens
+        case suppressBlank
+        case suppressTokens
+        case compressionRatioThreshold
+        case logProbThreshold
+        case firstTokenLogProbThreshold
+        case noSpeechThreshold
+        case concurrentWorkerCount
+        case chunkingStrategy
+        case alignmentEarlyStopping
+        case alignmentFrameMargin
+        case alignmentContentFrameCount
+    }
 
     public init(
         verbose: Bool = false,
@@ -208,7 +244,10 @@ public struct DecodingOptions: Codable, Sendable {
         firstTokenLogProbThreshold: Float? = -1.5,
         noSpeechThreshold: Float? = 0.6,
         concurrentWorkerCount: Int? = nil,
-        chunkingStrategy: ChunkingStrategy? = nil
+        chunkingStrategy: ChunkingStrategy? = nil,
+        alignmentEarlyStopping: Bool = false,
+        alignmentFrameMargin: Int = 25,
+        alignmentContentFrameCount: Int? = nil
     ) {
         self.verbose = verbose
         self.task = task
@@ -243,5 +282,57 @@ public struct DecodingOptions: Codable, Sendable {
         self.concurrentWorkerCount = concurrentWorkerCount ?? 4
         #endif
         self.chunkingStrategy = chunkingStrategy
+        self.alignmentEarlyStopping = alignmentEarlyStopping
+        self.alignmentFrameMargin = alignmentFrameMargin
+        self.alignmentContentFrameCount = alignmentContentFrameCount
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let compressionRatioThreshold = try container.contains(.compressionRatioThreshold)
+            ? container.decode(Float?.self, forKey: .compressionRatioThreshold)
+            : Float(2.4)
+        let logProbThreshold = try container.contains(.logProbThreshold)
+            ? container.decode(Float?.self, forKey: .logProbThreshold)
+            : Float(-1.0)
+        let firstTokenLogProbThreshold = try container.contains(.firstTokenLogProbThreshold)
+            ? container.decode(Float?.self, forKey: .firstTokenLogProbThreshold)
+            : Float(-1.5)
+        let noSpeechThreshold = try container.contains(.noSpeechThreshold)
+            ? container.decode(Float?.self, forKey: .noSpeechThreshold)
+            : Float(0.6)
+
+        self.init(
+            verbose: try container.decodeIfPresent(Bool.self, forKey: .verbose) ?? false,
+            task: try container.decodeIfPresent(DecodingTask.self, forKey: .task) ?? .transcribe,
+            language: try container.decodeIfPresent(String.self, forKey: .language),
+            temperature: try container.decodeIfPresent(Float.self, forKey: .temperature) ?? 0.0,
+            temperatureIncrementOnFallback: try container.decodeIfPresent(Float.self, forKey: .temperatureIncrementOnFallback) ?? 0.2,
+            temperatureFallbackCount: try container.decodeIfPresent(Int.self, forKey: .temperatureFallbackCount) ?? 5,
+            sampleLength: try container.decodeIfPresent(Int.self, forKey: .sampleLength) ?? Constants.maxTokenContext,
+            topK: try container.decodeIfPresent(Int.self, forKey: .topK) ?? 5,
+            usePrefillPrompt: try container.decodeIfPresent(Bool.self, forKey: .usePrefillPrompt) ?? true,
+            detectLanguage: try container.decodeIfPresent(Bool.self, forKey: .detectLanguage),
+            skipSpecialTokens: try container.decodeIfPresent(Bool.self, forKey: .skipSpecialTokens) ?? false,
+            withoutTimestamps: try container.decodeIfPresent(Bool.self, forKey: .withoutTimestamps) ?? false,
+            wordTimestamps: try container.decodeIfPresent(Bool.self, forKey: .wordTimestamps) ?? false,
+            maxInitialTimestamp: try container.decodeIfPresent(Float.self, forKey: .maxInitialTimestamp),
+            maxWindowSeek: try container.decodeIfPresent(Int.self, forKey: .maxWindowSeek),
+            clipTimestamps: try container.decodeIfPresent([Float].self, forKey: .clipTimestamps) ?? [],
+            windowClipTime: try container.decodeIfPresent(Float.self, forKey: .windowClipTime) ?? 1.0,
+            promptTokens: try container.decodeIfPresent([Int].self, forKey: .promptTokens),
+            prefixTokens: try container.decodeIfPresent([Int].self, forKey: .prefixTokens),
+            suppressBlank: try container.decodeIfPresent(Bool.self, forKey: .suppressBlank) ?? false,
+            suppressTokens: try container.decodeIfPresent([Int].self, forKey: .suppressTokens),
+            compressionRatioThreshold: compressionRatioThreshold,
+            logProbThreshold: logProbThreshold,
+            firstTokenLogProbThreshold: firstTokenLogProbThreshold,
+            noSpeechThreshold: noSpeechThreshold,
+            concurrentWorkerCount: try container.decodeIfPresent(Int.self, forKey: .concurrentWorkerCount),
+            chunkingStrategy: try container.decodeIfPresent(ChunkingStrategy.self, forKey: .chunkingStrategy),
+            alignmentEarlyStopping: try container.decodeIfPresent(Bool.self, forKey: .alignmentEarlyStopping) ?? false,
+            alignmentFrameMargin: try container.decodeIfPresent(Int.self, forKey: .alignmentFrameMargin) ?? 25,
+            alignmentContentFrameCount: try container.decodeIfPresent(Int.self, forKey: .alignmentContentFrameCount)
+        )
     }
 }

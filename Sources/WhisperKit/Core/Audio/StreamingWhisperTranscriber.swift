@@ -181,6 +181,8 @@ public actor StreamingWhisperTranscriber {
         var decodingOptions = options.decodingOptions
         decodingOptions.wordTimestamps = true
         decodingOptions.promptTokens = makePromptTokens()
+        decodingOptions.alignmentEarlyStopping = usesAlignmentEarlyStopping
+        decodingOptions.alignmentFrameMargin = options.alignmentFrameMargin
 
         let results = try await whisperKit.transcribe(
             audioArray: audioBuffer,
@@ -203,6 +205,15 @@ public actor StreamingWhisperTranscriber {
             )
         }
         return filterRepetitiveWords(words)
+    }
+
+    private var usesAlignmentEarlyStopping: Bool {
+        switch options.confirmationMode {
+            case .localAgreement:
+                return false
+            case .alignmentAttention, .hybrid:
+                return true
+        }
     }
 
     private func confirm(_ words: [StreamingWord]) -> [StreamingWord] {

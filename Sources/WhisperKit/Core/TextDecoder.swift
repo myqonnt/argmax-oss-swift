@@ -294,6 +294,40 @@ public extension TextDecoding {
             }
         }
     }
+
+    static func mostAttendedFrame(in alignmentSlice: MLMultiArray, contentFrameCount: Int) -> Int? {
+        let shape = alignmentSlice.shape.map { $0.intValue }
+        guard let columnCount = shape.last else { return nil }
+
+        let frameCount = min(max(0, contentFrameCount), columnCount)
+        guard frameCount > 0 else { return nil }
+
+        var bestFrame = 0
+        var bestValue = -Float.greatestFiniteMagnitude
+        for frame in 0..<frameCount {
+            let value = alignmentSlice[frame].floatValue
+            if value > bestValue {
+                bestValue = value
+                bestFrame = frame
+            }
+        }
+        return bestFrame
+    }
+
+    static func shouldStopForAlignment(
+        alignmentSlice: MLMultiArray,
+        contentFrameCount: Int,
+        frameMargin: Int
+    ) -> Bool {
+        guard let mostAttendedFrame = mostAttendedFrame(
+            in: alignmentSlice,
+            contentFrameCount: contentFrameCount
+        ) else {
+            return false
+        }
+
+        return contentFrameCount - mostAttendedFrame <= max(0, frameMargin)
+    }
 }
 
 open class TextDecoder: TextDecoding, WhisperMLModel {
@@ -683,6 +717,26 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
                     // Found the next token, store it
                     currentTokens.append(nextToken)
                     logProbs.append(nextTokenLogProb)
+                }
+
+                if !isPrefill,
+                   options.alignmentEarlyStopping,
+                   nextToken < tokenizer.specialTokens.specialTokenBegin,
+                   let contentFrameCount = options.alignmentContentFrameCount,
+                   let newAlignmentWeights = decoderOutput.cache?.alignmentWeights,
+                   TextDecoder.shouldStopForAlignment(
+                       alignmentSlice: newAlignmentWeights,
+                       contentFrameCount: contentFrameCount,
+                       frameMargin: options.alignmentFrameMargin
+                   )
+                {
+                    currentTokens.removeLast()
+                    logProbs.removeLast()
+                    timings.decodingNonPrediction += Date().timeIntervalSince(nonInferenceStartTime)
+                    timings.decodingLoop += Date().timeIntervalSince(loopStart)
+                    timings.totalDecodingLoops += 1
+                    Logging.debug("Early stopping: token alignment is within \(options.alignmentFrameMargin) frames of audio end")
+                    break
                 }
 
                 // Update KV cache for this token
