@@ -589,6 +589,7 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
         let prefilledIndex = decoderInputs.cacheLength[0].intValue
         let initialPromptIndex = decoderInputs.initialPrompt.count
         var currentTokens: [Int] = decoderInputs.initialPrompt
+        var currentTokenAlignmentFrames: [Int?] = Array(repeating: nil, count: currentTokens.count)
         var nextToken: Int = decoderInputs.initialPrompt.last!
         var logProbs: [Float] = Array(repeating: 0, count: currentTokens.count)
 
@@ -717,6 +718,17 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
                     // Found the next token, store it
                     currentTokens.append(nextToken)
                     logProbs.append(nextTokenLogProb)
+                    if nextToken < tokenizer.specialTokens.specialTokenBegin,
+                       let contentFrameCount = options.alignmentContentFrameCount,
+                       let newAlignmentWeights = decoderOutput.cache?.alignmentWeights
+                    {
+                        currentTokenAlignmentFrames.append(TextDecoder.mostAttendedFrame(
+                            in: newAlignmentWeights,
+                            contentFrameCount: contentFrameCount
+                        ))
+                    } else {
+                        currentTokenAlignmentFrames.append(nil)
+                    }
                 }
 
                 if !isPrefill,
@@ -732,6 +744,7 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
                 {
                     currentTokens.removeLast()
                     logProbs.removeLast()
+                    currentTokenAlignmentFrames.removeLast()
                     timings.decodingNonPrediction += Date().timeIntervalSince(nonInferenceStartTime)
                     timings.decodingLoop += Date().timeIntervalSince(loopStart)
                     timings.totalDecodingLoops += 1
@@ -830,11 +843,18 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
         let finalSamplingResult = tokenSampler.finalize(tokens: currentTokens, logProbs: logProbs)
         let segmentTokens = finalSamplingResult.tokens
         let segmentLogProbs = finalSamplingResult.logProbs
+        var segmentAlignmentFrames = currentTokenAlignmentFrames
+        if segmentAlignmentFrames.count < segmentTokens.count {
+            segmentAlignmentFrames.append(contentsOf: Array(repeating: nil, count: segmentTokens.count - segmentAlignmentFrames.count))
+        } else if segmentAlignmentFrames.count > segmentTokens.count {
+            segmentAlignmentFrames = Array(segmentAlignmentFrames.prefix(segmentTokens.count))
+        }
 
         let startIndex = segmentTokens.firstIndex(of: tokenizer.specialTokens.startOfTranscriptToken) ?? 0
         let endIndex = segmentTokens.firstIndex(of: tokenizer.specialTokens.endToken) ?? segmentTokens.count
         let filteredTokens = Array(segmentTokens[startIndex...endIndex])
         let filteredLogProbs = Array(segmentLogProbs[startIndex...endIndex])
+        let filteredAlignmentFrames = Array(segmentAlignmentFrames[startIndex...endIndex])
 
         let sumLogProbs = filteredLogProbs.reduce(0, +)
         let avgLogProbs = sumLogProbs / Float(filteredLogProbs.count)
@@ -896,6 +916,7 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
             languageProbs: languageProbs,
             tokens: filteredTokens,
             tokenLogProbs: tokenProbs,
+            tokenAlignmentFrames: filteredAlignmentFrames,
             text: transcript,
             avgLogProb: avgLogProbs,
             noSpeechProb: noSpeechProb,

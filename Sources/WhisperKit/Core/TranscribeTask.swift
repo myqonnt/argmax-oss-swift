@@ -163,7 +163,7 @@ open class TranscribeTask {
                 }
 
                 var windowDecodingOptions = options
-                if windowDecodingOptions.alignmentEarlyStopping {
+                if windowDecodingOptions.alignmentEarlyStopping || windowDecodingOptions.wordTimestamps {
                     windowDecodingOptions.alignmentContentFrameCount = Int(
                         ceil(Float(segmentSize) / Float(WhisperKit.sampleRate) / WhisperKit.secondsPerTimeToken)
                     )

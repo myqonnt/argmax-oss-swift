@@ -18,6 +18,7 @@ public struct StreamingDecodingOptions: Sendable {
     public var holdBackWords: Int
     public var promptTokenLimit: Int
     public var alignmentFrameMargin: Int
+    public var alignmentRewindThreshold: Int
     public var confirmationMode: StreamingConfirmationMode
     public var decodingOptions: DecodingOptions
 
@@ -28,6 +29,7 @@ public struct StreamingDecodingOptions: Sendable {
         holdBackWords: Int = 1,
         promptTokenLimit: Int = 224,
         alignmentFrameMargin: Int = 25,
+        alignmentRewindThreshold: Int = 50,
         confirmationMode: StreamingConfirmationMode = .localAgreement(rounds: 2),
         decodingOptions: DecodingOptions = DecodingOptions(wordTimestamps: true)
     ) {
@@ -37,6 +39,7 @@ public struct StreamingDecodingOptions: Sendable {
         self.holdBackWords = holdBackWords
         self.promptTokenLimit = promptTokenLimit
         self.alignmentFrameMargin = alignmentFrameMargin
+        self.alignmentRewindThreshold = alignmentRewindThreshold
         self.confirmationMode = confirmationMode
         self.decodingOptions = decodingOptions
         self.decodingOptions.wordTimestamps = true
@@ -82,6 +85,7 @@ public actor StreamingWhisperTranscriber {
     private var confirmedSegmentsStorage: [TranscriptionSegment] = []
     private var unconfirmedSegmentsStorage: [TranscriptionSegment] = []
     private var detectedLanguage: String?
+    private var lastAttendedFrame: Int?
 
     public init(
         whisperKit: WhisperKit,
@@ -109,6 +113,7 @@ public actor StreamingWhisperTranscriber {
         confirmedSegmentsStorage.removeAll(keepingCapacity: true)
         unconfirmedSegmentsStorage.removeAll(keepingCapacity: true)
         detectedLanguage = nil
+        lastAttendedFrame = nil
     }
 
     public func insertAudioChunk(_ samples: [Float], startTime: Double? = nil) {
@@ -138,6 +143,12 @@ public actor StreamingWhisperTranscriber {
         pendingAudioSeconds = 0
 
         let words = try await transcribeCurrentBuffer()
+        guard !shouldRejectForAlignmentRewind(words) else {
+            updateUnconfirmedSegments()
+            return makeUpdate(isFinal: false)
+        }
+        updateLastAttendedFrame(with: words)
+
         let committed = confirm(words)
         updateUnconfirmedSegments()
 
@@ -155,7 +166,12 @@ public actor StreamingWhisperTranscriber {
     public func finish() async throws -> StreamingTranscriptionUpdate {
         if !audioBuffer.isEmpty {
             let words = try await transcribeCurrentBuffer()
-            hypothesisBuffer.insert(words)
+            if shouldRejectForAlignmentRewind(words) {
+                Logging.debug("Rejecting final streaming hypothesis because alignment moved backward by more than \(options.alignmentRewindThreshold) frames")
+            } else {
+                updateLastAttendedFrame(with: words)
+                hypothesisBuffer.insert(words)
+            }
         }
 
         let remaining = hypothesisBuffer.complete()
@@ -174,6 +190,7 @@ public actor StreamingWhisperTranscriber {
         hasReceivedAudio = false
         audioOffsetSeconds = committedWords.last?.end ?? audioOffsetSeconds
         hypothesisBuffer = StreamingLocalAgreementBuffer(offset: audioOffsetSeconds)
+        lastAttendedFrame = nil
         return makeUpdate(newConfirmedSegments: newSegments, isFinal: true)
     }
 
@@ -194,19 +211,7 @@ public actor StreamingWhisperTranscriber {
             detectedLanguage = language
         }
 
-        let wordTimings = results.flatMap(\.allWords)
-        let words: [StreamingWord] = wordTimings.compactMap { word in
-            let start = Double(word.start) + audioOffsetSeconds
-            let end = Double(word.end) + audioOffsetSeconds
-            guard end > start else { return nil }
-            return StreamingWord(
-                start: start,
-                end: end,
-                text: word.word,
-                tokens: word.tokens,
-                probability: word.probability
-            )
-        }
+        let words = results.flatMap(\.segments).flatMap(streamingWords)
 
         if !words.isEmpty {
             return filterRepetitiveWords(words)
@@ -225,10 +230,53 @@ public actor StreamingWhisperTranscriber {
                 end: end,
                 text: text,
                 tokens: segment.tokens.filter { $0 < (whisperKit.tokenizer?.specialTokens.specialTokenBegin ?? Int.max) },
+                alignmentFrames: segment.tokenAlignmentFrames.compactMap { $0 },
                 probability: 0
             )
         }
         return filterRepetitiveWords(segmentWords)
+    }
+
+    private func streamingWords(from segment: TranscriptionSegment) -> [StreamingWord] {
+        guard let wordTimings = segment.words, !wordTimings.isEmpty else { return [] }
+
+        let specialTokenBegin = whisperKit.tokenizer?.specialTokens.specialTokenBegin ?? Int.max
+        let segmentTextTokenFrames = zip(segment.tokens, normalizedAlignmentFrames(segment.tokenAlignmentFrames, count: segment.tokens.count))
+            .filter { token, _ in token < specialTokenBegin }
+            .map { _, frame in frame }
+        var frameCursor = 0
+
+        return wordTimings.compactMap { word -> StreamingWord? in
+            let start = Double(word.start) + audioOffsetSeconds
+            let end = Double(word.end) + audioOffsetSeconds
+            guard end > start else { return nil }
+
+            let wordTextTokenCount = word.tokens.filter { $0 < specialTokenBegin }.count
+            let endCursor = min(segmentTextTokenFrames.count, frameCursor + wordTextTokenCount)
+            let alignmentFrames = frameCursor < endCursor
+                ? segmentTextTokenFrames[frameCursor..<endCursor].compactMap { $0 }
+                : []
+            frameCursor = endCursor
+
+            return StreamingWord(
+                start: start,
+                end: end,
+                text: word.word,
+                tokens: word.tokens,
+                alignmentFrames: alignmentFrames,
+                probability: word.probability
+            )
+        }
+    }
+
+    private func normalizedAlignmentFrames(_ frames: [Int?], count: Int) -> [Int?] {
+        if frames.count == count {
+            return frames
+        }
+        if frames.count > count {
+            return Array(frames.prefix(count))
+        }
+        return frames + Array(repeating: nil, count: count - frames.count)
     }
 
     private var supportsAlignmentAttention: Bool {
@@ -299,6 +347,41 @@ public actor StreamingWhisperTranscriber {
         return audioEnd - margin
     }
 
+    private func shouldRejectForAlignmentRewind(_ words: [StreamingWord]) -> Bool {
+        guard options.alignmentRewindThreshold > 0,
+              let lastAttendedFrame,
+              let currentFrame = estimatedLastAttendedFrame(from: words)
+        else {
+            return false
+        }
+
+        let rewind = lastAttendedFrame - currentFrame
+        guard rewind > options.alignmentRewindThreshold else {
+            return false
+        }
+
+        Logging.debug("Rejecting streaming hypothesis after alignment rewind of \(rewind) frames")
+        return true
+    }
+
+    private func updateLastAttendedFrame(with words: [StreamingWord]) {
+        guard let currentFrame = estimatedLastAttendedFrame(from: words) else { return }
+        lastAttendedFrame = max(lastAttendedFrame ?? currentFrame, currentFrame)
+    }
+
+    private func estimatedLastAttendedFrame(from words: [StreamingWord]) -> Int? {
+        let tracedFrames = words.flatMap(\.alignmentFrames)
+        if let maxFrame = tracedFrames.max() {
+            return maxFrame
+        }
+
+        guard let latestEnd = words.map(\.end).max() else { return nil }
+        let relativeEnd = latestEnd - audioOffsetSeconds
+        guard relativeEnd.isFinite, relativeEnd >= 0 else { return nil }
+
+        return Int((relativeEnd / Double(WhisperKit.secondsPerTimeToken)).rounded())
+    }
+
     private func makePromptTokens() -> [Int]? {
         guard options.promptTokenLimit > 0 else { return nil }
         let oldTokens = committedWords
@@ -351,8 +434,16 @@ public actor StreamingWhisperTranscriber {
         guard samplesToRemove > 0 else { return }
 
         audioBuffer.removeFirst(samplesToRemove)
+        trimLastAttendedFrame(removedSamples: samplesToRemove)
         audioOffsetSeconds += Double(samplesToRemove) / Double(WhisperKit.sampleRate)
         hypothesisBuffer.popCommitted(until: audioOffsetSeconds)
+    }
+
+    private func trimLastAttendedFrame(removedSamples: Int) {
+        guard let lastAttendedFrame else { return }
+        let removedSeconds = Double(removedSamples) / Double(WhisperKit.sampleRate)
+        let removedFrames = Int((removedSeconds / Double(WhisperKit.secondsPerTimeToken)).rounded())
+        self.lastAttendedFrame = max(0, lastAttendedFrame - removedFrames)
     }
 
     private func updateUnconfirmedSegments() {
@@ -380,6 +471,16 @@ public actor StreamingWhisperTranscriber {
         guard !text.isEmpty else { return [] }
 
         let tokens = words.flatMap(\.tokens)
+        let tokenAlignmentFrames = words.flatMap { word -> [Int?] in
+            let frames = word.alignmentFrames.map(Optional.some)
+            if frames.count == word.tokens.count {
+                return frames
+            }
+            if frames.count > word.tokens.count {
+                return Array(frames.prefix(word.tokens.count))
+            }
+            return frames + Array(repeating: nil, count: word.tokens.count - frames.count)
+        }
         if let threshold = options.decodingOptions.compressionRatioThreshold,
            TextUtilities.compressionRatio(of: text) > threshold
         {
@@ -393,6 +494,7 @@ public actor StreamingWhisperTranscriber {
             text: text,
             tokens: tokens,
             tokenLogProbs: tokens.map { [$0: Float(0)] },
+            tokenAlignmentFrames: tokenAlignmentFrames,
             temperature: options.decodingOptions.temperature,
             words: words.map {
                 WordTiming(
@@ -435,6 +537,7 @@ private struct StreamingWord: Equatable, Sendable {
     var end: Double
     var text: String
     var tokens: [Int]
+    var alignmentFrames: [Int]
     var probability: Float
 }
 

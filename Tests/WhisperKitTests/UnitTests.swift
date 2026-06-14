@@ -63,6 +63,14 @@ final class UnitTests: XCTestCase {
         XCTAssertNil(options.alignmentContentFrameCount)
     }
 
+    func testStreamingDecodingOptionsAlignmentRewindThreshold() {
+        let defaultOptions = StreamingDecodingOptions()
+        XCTAssertEqual(defaultOptions.alignmentRewindThreshold, 50)
+
+        let disabledOptions = StreamingDecodingOptions(alignmentRewindThreshold: 0)
+        XCTAssertEqual(disabledOptions.alignmentRewindThreshold, 0)
+    }
+
     func testDecodingOptionsPreservesExplicitNullThresholds() throws {
         let data = Data(#"{"compressionRatioThreshold":null,"logProbThreshold":null,"firstTokenLogProbThreshold":null,"noSpeechThreshold":null}"#.utf8)
         let options = try JSONDecoder().decode(DecodingOptions.self, from: data)
@@ -2490,6 +2498,36 @@ final class UnitTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testSegmentSeekerPreservesTokenAlignmentFrames() {
+        let tokenizer = CustomTokenizer(specialTokenBegin: 100)
+        let decodingResult = DecodingResult(
+            language: "en",
+            languageProbs: [:],
+            tokens: [6, 11, 12, 1],
+            tokenLogProbs: [[6: 0], [11: -0.1], [12: -0.2], [1: 0]],
+            tokenAlignmentFrames: [nil, 42, 48, nil],
+            text: "mock text",
+            avgLogProb: -0.1,
+            noSpeechProb: 0,
+            temperature: 0,
+            compressionRatio: 1
+        )
+
+        let (_, segments) = SegmentSeeker().findSeekPointAndSegments(
+            decodingResult: decodingResult,
+            options: DecodingOptions(),
+            allSegmentsCount: 0,
+            currentSeek: 0,
+            segmentSize: 16000,
+            sampleRate: 16000,
+            timeToken: 200,
+            specialToken: 100,
+            tokenizer: tokenizer
+        )
+
+        XCTAssertEqual(segments?.first?.tokenAlignmentFrames, [nil, 42, 48, nil])
     }
 
     func testFindAlignment() async throws {

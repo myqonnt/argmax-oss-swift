@@ -385,6 +385,7 @@ public struct DecodingResult {
     public var languageProbs: [String: Float]
     public var tokens: [Int]
     public var tokenLogProbs: [[Int: Float]]
+    public var tokenAlignmentFrames: [Int?]
     public var text: String
     public var avgLogProb: Float
     public var noSpeechProb: Float
@@ -399,6 +400,7 @@ public struct DecodingResult {
                               languageProbs: [:],
                               tokens: [],
                               tokenLogProbs: [],
+                              tokenAlignmentFrames: [],
                               text: "",
                               avgLogProb: 0.0,
                               noSpeechProb: 0.0,
@@ -414,6 +416,7 @@ public struct DecodingResult {
         languageProbs: [String: Float],
         tokens: [Int],
         tokenLogProbs: [[Int: Float]],
+        tokenAlignmentFrames: [Int?] = [],
         text: String,
         avgLogProb: Float,
         noSpeechProb: Float,
@@ -427,6 +430,7 @@ public struct DecodingResult {
         self.languageProbs = languageProbs
         self.tokens = tokens
         self.tokenLogProbs = tokenLogProbs
+        self.tokenAlignmentFrames = tokenAlignmentFrames
         self.text = text
         self.avgLogProb = avgLogProb
         self.noSpeechProb = noSpeechProb
@@ -579,6 +583,7 @@ public struct TranscriptionSegment: Hashable, Codable, Sendable {
     public var text: String
     public var tokens: [Int]
     public var tokenLogProbs: [[Int: Float]]
+    public var tokenAlignmentFrames: [Int?]
     public var temperature: Float
     public var avgLogprob: Float
     public var compressionRatio: Float
@@ -598,6 +603,7 @@ public struct TranscriptionSegment: Hashable, Codable, Sendable {
         text: String = "",
         tokens: [Int] = [],
         tokenLogProbs: [[Int: Float]] = [[:]],
+        tokenAlignmentFrames: [Int?] = [],
         temperature: Float = 1.0,
         avgLogprob: Float = 0.0,
         compressionRatio: Float = 1.0,
@@ -611,6 +617,7 @@ public struct TranscriptionSegment: Hashable, Codable, Sendable {
         self.text = text
         self.tokens = tokens
         self.tokenLogProbs = tokenLogProbs
+        self.tokenAlignmentFrames = tokenAlignmentFrames
         self.temperature = temperature
         self.avgLogprob = avgLogprob
         self.compressionRatio = compressionRatio

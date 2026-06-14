@@ -78,6 +78,10 @@ open class SegmentSeeker: SegmentSeeking {
         // loop through all consecutive timestamps and turn them into `TranscriptionSegments`
         let currentTokens = decodingResult.tokens
         let currentLogProbs = decodingResult.tokenLogProbs
+        let currentAlignmentFrames = normalizedAlignmentFrames(
+            decodingResult.tokenAlignmentFrames,
+            count: currentTokens.count
+        )
         let isTimestampToken = currentTokens.map { $0 >= timeToken }
 
         // check if single or double timestamp ending
@@ -110,6 +114,7 @@ open class SegmentSeeker: SegmentSeeking {
             for currentSliceEnd in sliceIndexes {
                 let slicedTokens = Array(currentTokens[lastSliceStart..<currentSliceEnd])
                 let slicedTokenLogProbs = Array(currentLogProbs[lastSliceStart..<currentSliceEnd])
+                let slicedAlignmentFrames = Array(currentAlignmentFrames[lastSliceStart..<currentSliceEnd])
                 let timestampTokens = slicedTokens.filter { $0 >= timeToken }
 
                 let startTimestampSeconds = Float(timestampTokens.first! - timeToken) * secondsPerTimeToken
@@ -128,6 +133,7 @@ open class SegmentSeeker: SegmentSeeking {
                     text: sliceText,
                     tokens: slicedTokens,
                     tokenLogProbs: slicedTokenLogProbs,
+                    tokenAlignmentFrames: slicedAlignmentFrames,
                     temperature: decodingResult.temperature,
                     avgLogprob: decodingResult.avgLogProb,
                     compressionRatio: decodingResult.compressionRatio,
@@ -172,6 +178,7 @@ open class SegmentSeeker: SegmentSeeking {
                 text: segmentText,
                 tokens: decodingResult.tokens,
                 tokenLogProbs: decodingResult.tokenLogProbs,
+                tokenAlignmentFrames: currentAlignmentFrames,
                 temperature: decodingResult.temperature,
                 avgLogprob: decodingResult.avgLogProb,
                 compressionRatio: decodingResult.compressionRatio,
@@ -186,6 +193,16 @@ open class SegmentSeeker: SegmentSeeking {
         }
 
         return (seek, currentSegments)
+    }
+
+    private func normalizedAlignmentFrames(_ frames: [Int?], count: Int) -> [Int?] {
+        if frames.count == count {
+            return frames
+        }
+        if frames.count > count {
+            return Array(frames.prefix(count))
+        }
+        return frames + Array(repeating: nil, count: count - frames.count)
     }
 
     // MARK: - Word Timestamps
