@@ -169,6 +169,9 @@ public actor StreamingWhisperTranscriber {
         unconfirmedSegmentsStorage.removeAll(keepingCapacity: true)
         audioBuffer.removeAll(keepingCapacity: true)
         pendingAudioSeconds = 0
+        hasReceivedAudio = false
+        audioOffsetSeconds = committedWords.last?.end ?? audioOffsetSeconds
+        hypothesisBuffer = StreamingLocalAgreementBuffer(offset: audioOffsetSeconds)
         return makeUpdate(newConfirmedSegments: newSegments, isFinal: true)
     }
 
