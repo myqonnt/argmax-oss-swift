@@ -176,7 +176,6 @@ public actor StreamingWhisperTranscriber {
         var decodingOptions = options.decodingOptions
         decodingOptions.wordTimestamps = true
         decodingOptions.promptTokens = makePromptTokens()
-        decodingOptions.prefixTokens = makePrefixTokens()
 
         let results = try await whisperKit.transcribe(
             audioArray: audioBuffer,
@@ -186,7 +185,7 @@ public actor StreamingWhisperTranscriber {
             detectedLanguage = language
         }
 
-        return results.flatMap(\.allWords).compactMap { word in
+        let words: [StreamingWord] = results.flatMap(\.allWords).compactMap { word in
             let start = Double(word.start) + audioOffsetSeconds
             let end = Double(word.end) + audioOffsetSeconds
             guard end > start else { return nil }
@@ -198,6 +197,7 @@ public actor StreamingWhisperTranscriber {
                 probability: word.probability
             )
         }
+        return filterRepetitiveWords(words)
     }
 
     private func makePromptTokens() -> [Int]? {
@@ -215,21 +215,6 @@ public actor StreamingWhisperTranscriber {
             return Array((promptTokens + trimmed).suffix(options.promptTokenLimit))
         }
         return trimmed
-    }
-
-    private func makePrefixTokens() -> [Int]? {
-        let prefixTokens = committedWords
-            .filter { $0.end > audioOffsetSeconds }
-            .flatMap(\.tokens)
-            .filter { $0 < (whisperKit.tokenizer?.specialTokens.specialTokenBegin ?? Int.max) }
-        guard !prefixTokens.isEmpty else {
-            return options.decodingOptions.prefixTokens
-        }
-
-        if let optionPrefix = options.decodingOptions.prefixTokens, !optionPrefix.isEmpty {
-            return optionPrefix + prefixTokens
-        }
-        return prefixTokens
     }
 
     private func trimAudioBufferIfNeeded() {
@@ -281,6 +266,11 @@ public actor StreamingWhisperTranscriber {
         guard !text.isEmpty else { return [] }
 
         let tokens = words.flatMap(\.tokens)
+        if let threshold = options.decodingOptions.compressionRatioThreshold,
+           TextUtilities.compressionRatio(of: text) > threshold
+        {
+            return []
+        }
         let segment = TranscriptionSegment(
             id: confirmedSegmentsStorage.count,
             seek: Int((words.first?.start ?? 0) * Double(WhisperKit.sampleRate)),
@@ -301,6 +291,28 @@ public actor StreamingWhisperTranscriber {
             }
         )
         return [segment]
+    }
+
+    private func filterRepetitiveWords(_ words: [StreamingWord]) -> [StreamingWord] {
+        guard words.count >= 6 else { return words }
+        let text = words.map(\.text).joined()
+        if let threshold = options.decodingOptions.compressionRatioThreshold,
+           TextUtilities.compressionRatio(of: text) <= threshold
+        {
+            return words
+        }
+
+        var filtered = words
+        while filtered.count >= 6 {
+            let tail = filtered.suffix(6).map { StreamingLocalAgreementBuffer.normalizedText($0.text) }
+            let uniqueTail = Set(tail)
+            if uniqueTail.count > 2 {
+                break
+            }
+            filtered.removeLast()
+        }
+
+        return filtered
     }
 }
 
@@ -351,7 +363,7 @@ private struct StreamingLocalAgreementBuffer: Sendable {
     }
 
     func complete() -> [StreamingWord] {
-        previousHypothesis + currentHypothesis
+        currentHypothesis.isEmpty ? previousHypothesis : currentHypothesis
     }
 
     private mutating func removeDuplicatePrefixNearCommitBoundary() {
@@ -390,7 +402,7 @@ private struct StreamingLocalAgreementBuffer: Sendable {
         return prefix
     }
 
-    private static func normalizedText(_ text: String) -> String {
+    fileprivate static func normalizedText(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
