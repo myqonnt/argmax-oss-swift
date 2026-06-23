@@ -29,27 +29,37 @@ public struct DiarizationResult: Sendable {
     public let totalFrames: Int
     public let frameRate: Float
     public private(set) var segments: [SpeakerSegment]
+    public private(set) var speakers: [DiarizedSpeaker]
     public var timings: (any DiarizationTimings)?
 
     /// Pyannote init: builds segments from binary speaker activity matrix
-    init(binaryMatrix: [[Int]], diarizationFrameRate: Float) {
+    init(binaryMatrix: [[Int]], diarizationFrameRate: Float, speakers: [DiarizedSpeaker] = []) {
         self.binaryMatrix = binaryMatrix
         self.frameRate = diarizationFrameRate
         self.speakerCount = binaryMatrix.count
         self.totalFrames = speakerCount > 0 ? binaryMatrix[0].count : 0
         self.segments = []
+        self.speakers = speakers
         self.timings = nil
 
         self.updateSegments(minActiveOffset: 0.0)
     }
 
     /// Generic init: for engines that produce segments directly
-    public init(speakerCount: Int, totalFrames: Int, frameRate: Float, segments: [SpeakerSegment], timings: (any DiarizationTimings)? = nil) {
+    public init(
+        speakerCount: Int,
+        totalFrames: Int,
+        frameRate: Float,
+        segments: [SpeakerSegment],
+        speakers: [DiarizedSpeaker] = [],
+        timings: (any DiarizationTimings)? = nil
+    ) {
         self.binaryMatrix = []
         self.speakerCount = speakerCount
         self.totalFrames = totalFrames
         self.frameRate = frameRate
         self.segments = segments
+        self.speakers = Self.speakersByRefreshingStats(speakers, from: segments, speakerCount: speakerCount)
         self.timings = timings
     }
 
@@ -99,6 +109,43 @@ public struct DiarizationResult: Sendable {
         }
 
         self.segments = segments.sorted { $0.startFrame < $1.startFrame }
+        self.speakers = Self.speakersByRefreshingStats(speakers, from: self.segments, speakerCount: speakerCount)
+    }
+
+    private static func speakersByRefreshingStats(
+        _ speakers: [DiarizedSpeaker],
+        from segments: [SpeakerSegment],
+        speakerCount: Int
+    ) -> [DiarizedSpeaker] {
+        var segmentCounts: [Int: Int] = [:]
+        var speakingDurations: [Int: Float] = [:]
+
+        for segment in segments {
+            for speakerId in segment.speaker.speakerIds {
+                segmentCounts[speakerId, default: 0] += 1
+                speakingDurations[speakerId, default: 0] += max(0, segment.endTime - segment.startTime)
+            }
+        }
+
+        let speakerIds = Set(0..<speakerCount).union(speakers.map(\.id)).sorted()
+        let speakerById = speakers.reduce(into: [Int: DiarizedSpeaker]()) { result, speaker in
+            result[speaker.id] = speaker
+        }
+
+        return speakerIds.map { speakerId in
+            if let speaker = speakerById[speakerId] {
+                return speaker.replacingStats(
+                    segmentCount: segmentCounts[speakerId, default: 0],
+                    speakingDuration: speakingDurations[speakerId, default: 0]
+                )
+            }
+
+            return DiarizedSpeaker(
+                id: speakerId,
+                segmentCount: segmentCounts[speakerId, default: 0],
+                speakingDuration: speakingDurations[speakerId, default: 0]
+            )
+        }
     }
 
     // MARK: - Speaker Info Matching

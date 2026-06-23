@@ -98,18 +98,27 @@ final class DiarizationResultTests: XCTestCase {
         XCTAssertEqual(result.speakerCount, 2)
         XCTAssertEqual(result.totalFrames, 50)
         XCTAssertEqual(result.segments.count, 2)
+        XCTAssertEqual(result.speakers.count, 2)
 
         XCTAssertEqual(result.segments[0].speaker, .speakerId(0))
         XCTAssertEqual(result.segments[0].speaker.speakerId, 0)
         XCTAssertEqual(result.segments[0].speaker.speakerIds, [0])
         XCTAssertEqual(result.segments[0].startFrame, 0)
         XCTAssertEqual(result.segments[0].endFrame, 25)
+        XCTAssertEqual(result.speakers[0].id, 0)
+        XCTAssertNil(result.speakers[0].voiceprint)
+        XCTAssertEqual(result.speakers[0].segmentCount, 1)
+        XCTAssertEqual(result.speakers[0].speakingDuration, 1.0, accuracy: 0.001)
 
         XCTAssertEqual(result.segments[1].speaker, .speakerId(1))
         XCTAssertEqual(result.segments[1].speaker.speakerId, 1)
         XCTAssertEqual(result.segments[1].speaker.speakerIds, [1])
         XCTAssertEqual(result.segments[1].startFrame, 25)
         XCTAssertEqual(result.segments[1].endFrame, 50)
+        XCTAssertEqual(result.speakers[1].id, 1)
+        XCTAssertNil(result.speakers[1].voiceprint)
+        XCTAssertEqual(result.speakers[1].segmentCount, 1)
+        XCTAssertEqual(result.speakers[1].speakingDuration, 1.0, accuracy: 0.001)
     }
 
     func testDiarizationResultWithEmptyMatrix() {
@@ -118,6 +127,59 @@ final class DiarizationResultTests: XCTestCase {
         XCTAssertEqual(result.speakerCount, 0)
         XCTAssertEqual(result.totalFrames, 0)
         XCTAssertTrue(result.segments.isEmpty)
+        XCTAssertTrue(result.speakers.isEmpty)
+    }
+
+    func testDiarizationResultPreservesSpeakerVoiceprintAndRefreshesStats() {
+        let voiceprint = SpeakerVoiceprint(
+            embedding: [1.0, 0.0],
+            pldaEmbedding: [0.5, 0.5],
+            sampleCount: 3,
+            source: .pyannoteWindowMean
+        )
+        let speakers = [
+            DiarizedSpeaker(id: 0, voiceprint: voiceprint, segmentCount: 0, speakingDuration: 0)
+        ]
+        let segments = [
+            SpeakerSegment(speaker: .speakerId(0), startTime: 0.0, endTime: 1.5, frameRate: 10.0),
+            SpeakerSegment(speaker: .speakerId(0), startTime: 2.0, endTime: 3.0, frameRate: 10.0)
+        ]
+
+        let result = DiarizationResult(
+            speakerCount: 1,
+            totalFrames: 30,
+            frameRate: 10.0,
+            segments: segments,
+            speakers: speakers
+        )
+
+        XCTAssertEqual(result.speakers.count, 1)
+        XCTAssertEqual(result.speakers[0].id, 0)
+        XCTAssertEqual(result.speakers[0].voiceprint?.embedding, [1.0, 0.0])
+        XCTAssertEqual(result.speakers[0].voiceprint?.pldaEmbedding, [0.5, 0.5])
+        XCTAssertEqual(result.speakers[0].voiceprint?.sampleCount, 3)
+        XCTAssertEqual(result.speakers[0].segmentCount, 2)
+        XCTAssertEqual(result.speakers[0].speakingDuration, 2.5, accuracy: 0.001)
+    }
+
+    func testDiarizationResultUpdateSegmentsRefreshesSpeakerStats() {
+        let diarizationFrameRate: Float = 10.0
+        let binaryMatrix = [[
+            1, 1, 1,
+            0,
+            1, 1, 1
+        ]]
+
+        var result = DiarizationResult(binaryMatrix: binaryMatrix, diarizationFrameRate: diarizationFrameRate)
+        XCTAssertEqual(result.segments.count, 2)
+        XCTAssertEqual(result.speakers[0].segmentCount, 2)
+        XCTAssertEqual(result.speakers[0].speakingDuration, 0.6, accuracy: 0.001)
+
+        result.updateSegments(minActiveOffset: 0.2)
+
+        XCTAssertEqual(result.segments.count, 1)
+        XCTAssertEqual(result.speakers[0].segmentCount, 1)
+        XCTAssertEqual(result.speakers[0].speakingDuration, 0.7, accuracy: 0.001)
     }
 
     func testSpeakerAssignmentWithSubsegmentStrategy() {
