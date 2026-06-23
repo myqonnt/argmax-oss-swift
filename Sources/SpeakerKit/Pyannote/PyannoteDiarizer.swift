@@ -360,7 +360,68 @@ actor PyannoteDiarizerActor {
             }
         }
 
-        return DiarizationResult(binaryMatrix: binaryDiarization, diarizationFrameRate: diarizationFrameRate)
+        let speakers = makeDiarizedSpeakers(from: speakerEmbeddings, speakerCount: speakerCount)
+        return DiarizationResult(binaryMatrix: binaryDiarization, diarizationFrameRate: diarizationFrameRate, speakers: speakers)
+    }
+
+    private func makeDiarizedSpeakers(from speakerEmbeddings: [SpeakerEmbedding], speakerCount: Int) -> [DiarizedSpeaker] {
+        let grouped = Dictionary(grouping: speakerEmbeddings.filter { $0.clusterId >= 0 }) { $0.clusterId }
+
+        return (0..<speakerCount).map { speakerId in
+            let embeddings = grouped[speakerId] ?? []
+            let voiceprint = makeVoiceprint(from: embeddings)
+            return DiarizedSpeaker(
+                id: speakerId,
+                voiceprint: voiceprint,
+                segmentCount: 0,
+                speakingDuration: 0
+            )
+        }
+    }
+
+    private func makeVoiceprint(from speakerEmbeddings: [SpeakerEmbedding]) -> SpeakerVoiceprint? {
+        guard let embedding = meanNormalized(speakerEmbeddings.map(\.embedding)) else {
+            return nil
+        }
+
+        let pldaVectors = speakerEmbeddings.compactMap(\.pldaEmbedding)
+        let pldaEmbedding = pldaVectors.isEmpty ? nil : meanNormalized(pldaVectors)
+
+        return SpeakerVoiceprint(
+            embedding: embedding,
+            pldaEmbedding: pldaEmbedding,
+            sampleCount: speakerEmbeddings.count,
+            source: .pyannoteWindowMean
+        )
+    }
+
+    private func meanNormalized(_ vectors: [[Float]]) -> [Float]? {
+        guard let first = vectors.first, !first.isEmpty else {
+            return nil
+        }
+
+        let dimension = first.count
+        var sum = Array(repeating: Float(0), count: dimension)
+        var count = 0
+
+        for vector in vectors where vector.count == dimension {
+            for index in 0..<dimension {
+                sum[index] += vector[index]
+            }
+            count += 1
+        }
+
+        guard count > 0 else {
+            return nil
+        }
+
+        let mean = sum.map { $0 / Float(count) }
+        let norm = mean.map { $0 * $0 }.reduce(0, +).squareRoot()
+        guard norm > 0 else {
+            return mean
+        }
+
+        return mean.map { $0 / norm }
     }
 
     func diarize(audioArray: [Float], options: (any DiarizationOptions)?, progressCallback: (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult {
