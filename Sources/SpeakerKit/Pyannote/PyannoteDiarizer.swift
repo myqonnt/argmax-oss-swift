@@ -77,6 +77,14 @@ public final class PyannoteDiarizer: Diarizer, @unchecked Sendable {
     ) async throws -> DiarizationResult {
         try await diarizerActor.diarize(audioArray: audioArray, options: options, progressCallback: progressCallback)
     }
+
+    public func diarize(
+        audioSource: any SpeakerDiarizationAudioSource,
+        options: (any DiarizationOptions)? = nil,
+        progressCallback: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> DiarizationResult {
+        try await diarizerActor.diarize(audioSource: audioSource, options: options, progressCallback: progressCallback)
+    }
 }
 
 // MARK: - PyannoteDiarizerActor
@@ -161,7 +169,7 @@ actor PyannoteDiarizerActor {
         let segmenterModel = config.segmenterModel
         let embedderModel = config.embedderModel
         let clusterer = config.clusterer
-        let concurrentEmbedderWorkers = config.concurrentEmbedderWorkers
+        let configuredEmbedderWorkers = config.concurrentEmbedderWorkers
 
         timings.numberOfSegmenterWorkers = segmenterModel.concurrentWorkers
 
@@ -181,15 +189,15 @@ actor PyannoteDiarizerActor {
                 let expectedChunks = max(1, segmenterModel.maxChunks(for: audioClip.count))
                 let counter = EmbeddingBatchCounter()
 
-                let embedderWorkerCount = concurrentEmbedderWorkers ?? min(8, max(2, Int(clipSeconds / 30.0)))
+                let embedderWorkerCount = max(1, configuredEmbedderWorkers ?? 1)
                 self.timings.numberOfEmbedderWorkers = embedderWorkerCount
 
-                let (outputStream, outputContinuation) = AsyncStream.makeStream(of: SpeakerSegmenterOutput.self)
-
                 try await withThrowingTaskGroup(of: Void.self) { group in
+                    let outputQueue = SpeakerSegmenterOutputQueue(capacity: max(2, embedderWorkerCount))
+
                     for _ in 0..<embedderWorkerCount {
                         group.addTask { [processedAudioSeconds, progressReporter] in
-                            for await output in outputStream {
+                            while let output = await outputQueue.next() {
                                 guard !Task.isCancelled else { break }
                                 let startTime = CFAbsoluteTimeGetCurrent()
                                 do {
@@ -211,11 +219,117 @@ actor PyannoteDiarizerActor {
 
                     group.addTask {
                         let segmenterStart = CFAbsoluteTimeGetCurrent()
-                        try await segmenterModel.predict(audioArray: audioClip, outputContinuation: outputContinuation)
+                        do {
+                            try await segmenterModel.predict(audioArray: audioClip) { output in
+                                await outputQueue.push(output)
+                            }
+                            await outputQueue.finish()
+                        } catch {
+                            await outputQueue.finish()
+                            throw error
+                        }
                         await counter.addSegmenterTime((CFAbsoluteTimeGetCurrent() - segmenterStart) * 1_000)
                     }
 
                     // Drain the group to propagate any error thrown by the segmenter model
+                    for try await _ in group {}
+                }
+
+                let snap = await counter.snapshot()
+                self.timings.segmenterTime += snap.segmenterTime
+                self.timings.embedderTime += snap.embedderTime
+                self.timings.numberOfChunks += snap.chunkCount
+                processedAudioSeconds += clipSeconds
+            }
+
+            await progressReporter.report(completed: 100)
+        }
+    }
+
+    func initialize(
+        audioSource: any SpeakerDiarizationAudioSource,
+        options: PyannoteDiarizationOptions? = nil,
+        progressCallback: (@Sendable (Progress) -> Void)? = nil
+    ) async throws {
+        await reset()
+        timings.pipelineStart = CFAbsoluteTimeGetCurrent()
+
+        try await loadModels()
+        audioLength = audioSource.sampleCount
+
+        let seekClips = prepareSeekClips(contentFrames: audioSource.sampleCount, options: options)
+        Logging.debug("[PyannoteDiarizer] audioSource: \(audioSource.sampleCount), seekClips: \(seekClips)")
+
+        let totalAudioSeconds = seekClips.reduce(0.0) { $0 + Double($1.1 - $1.0) / Double(WhisperKit.sampleRate) }
+
+        let segmenterModel = config.segmenterModel
+        let embedderModel = config.embedderModel
+        let clusterer = config.clusterer
+        let configuredEmbedderWorkers = config.concurrentEmbedderWorkers
+
+        timings.numberOfSegmenterWorkers = segmenterModel.concurrentWorkers
+
+        let progressObj = Progress(totalUnitCount: 100)
+        let progressReporter = ProgressReporter(progress: progressObj, callback: progressCallback)
+        diarizationTask = Task {
+            var processedAudioSeconds = 0.0
+
+            for (seekClipStart, seekClipEnd) in seekClips {
+                try Task.checkCancellation()
+
+                let clipSampleCount = max(0, seekClipEnd - seekClipStart)
+                let clipSeconds = Double(clipSampleCount) / Double(WhisperKit.sampleRate)
+                self.timings.inputAudioSeconds += clipSeconds
+
+                let expectedChunks = max(1, segmenterModel.maxChunks(for: clipSampleCount))
+                let counter = EmbeddingBatchCounter()
+
+                let embedderWorkerCount = max(1, configuredEmbedderWorkers ?? 1)
+                self.timings.numberOfEmbedderWorkers = embedderWorkerCount
+
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    let outputQueue = SpeakerSegmenterOutputQueue(capacity: max(2, embedderWorkerCount))
+
+                    for _ in 0..<embedderWorkerCount {
+                        group.addTask { [processedAudioSeconds, progressReporter] in
+                            while let output = await outputQueue.next() {
+                                guard !Task.isCancelled else { break }
+                                let startTime = CFAbsoluteTimeGetCurrent()
+                                do {
+                                    let embeddings = try await embedderModel.embed(segmenterOutput: output)
+                                    await clusterer.add(speakerEmbeddings: embeddings)
+                                } catch {
+                                    Logging.error("[PyannoteDiarizer] Error processing embeddings: \(error)")
+                                }
+                                let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1_000
+                                await counter.add(time: elapsed)
+
+                                let done = await counter.count
+                                let fraction = (processedAudioSeconds + clipSeconds * Double(done) / Double(expectedChunks)) / max(totalAudioSeconds, 1)
+                                let completed = Int64(min(max(fraction, 0), 0.99) * 100)
+                                await progressReporter.report(completed: completed)
+                            }
+                        }
+                    }
+
+                    group.addTask {
+                        let segmenterStart = CFAbsoluteTimeGetCurrent()
+                        do {
+                            try await segmenterModel.predict(
+                                audioSource: audioSource,
+                                startSample: seekClipStart,
+                                endSample: seekClipEnd
+                            ) { output in
+                                await outputQueue.push(output)
+                            }
+                            await outputQueue.finish()
+                        } catch {
+                            await outputQueue.finish()
+                            throw error
+                        }
+                        await counter.addSegmenterTime((CFAbsoluteTimeGetCurrent() - segmenterStart) * 1_000)
+                    }
+
                     for try await _ in group {}
                 }
 
@@ -462,6 +576,43 @@ actor PyannoteDiarizerActor {
         }
         return result
     }
+
+    func diarize(audioSource: any SpeakerDiarizationAudioSource, options: (any DiarizationOptions)?, progressCallback: (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult {
+        let opts = options as? PyannoteDiarizationOptions
+
+        guard let progressCallback else {
+            try await initialize(audioSource: audioSource, options: opts, progressCallback: nil)
+            var result = try await clusterSpeakers(with: config.clusterer, options: opts, progressCallback: nil)
+            if let minActiveOffset = opts?.minActiveOffset {
+                result.updateSegments(minActiveOffset: minActiveOffset)
+            }
+            return result
+        }
+
+        let diarizationProgress = Progress(totalUnitCount: 100)
+        progressCallback(diarizationProgress)
+
+        try await initialize(audioSource: audioSource, options: opts) { @Sendable child in
+            let value = Int64(child.fractionCompleted * 85)
+            if value > diarizationProgress.completedUnitCount {
+                diarizationProgress.completedUnitCount = value
+                progressCallback(diarizationProgress)
+            }
+        }
+
+        var result = try await clusterSpeakers(with: config.clusterer, options: opts) { @Sendable child in
+            let value = 85 + Int64(child.fractionCompleted * 15)
+            if value > diarizationProgress.completedUnitCount {
+                diarizationProgress.completedUnitCount = value
+                progressCallback(diarizationProgress)
+            }
+        }
+
+        if let minActiveOffset = opts?.minActiveOffset {
+            result.updateSegments(minActiveOffset: minActiveOffset)
+        }
+        return result
+    }
 }
 
 // MARK: - ProgressReporter
@@ -480,6 +631,74 @@ private actor ProgressReporter {
         if completed > progress.completedUnitCount {
             progress.completedUnitCount = completed
             callback?(progress)
+        }
+    }
+}
+
+// MARK: - SpeakerSegmenterOutputQueue
+
+private actor SpeakerSegmenterOutputQueue {
+    private let capacity: Int
+    private var outputs: [SpeakerSegmenterOutput] = []
+    private var waiters: [CheckedContinuation<SpeakerSegmenterOutput?, Never>] = []
+    private var pushWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isFinished = false
+
+    init(capacity: Int) {
+        self.capacity = max(1, capacity)
+    }
+
+    func push(_ output: SpeakerSegmenterOutput) async {
+        while outputs.count >= capacity && waiters.isEmpty && !isFinished {
+            await withCheckedContinuation { continuation in
+                pushWaiters.append(continuation)
+            }
+        }
+
+        guard !isFinished else { return }
+
+        if waiters.isEmpty {
+            outputs.append(output)
+        } else {
+            waiters.removeFirst().resume(returning: output)
+        }
+    }
+
+    func finish() {
+        guard !isFinished else { return }
+        isFinished = true
+        let pendingWaiters = waiters
+        waiters.removeAll()
+        for waiter in pendingWaiters {
+            waiter.resume(returning: nil)
+        }
+        resumeAllProducers()
+    }
+
+    func next() async -> SpeakerSegmenterOutput? {
+        if !outputs.isEmpty {
+            let output = outputs.removeFirst()
+            resumeOneProducer()
+            return output
+        }
+        if isFinished {
+            return nil
+        }
+        return await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    private func resumeOneProducer() {
+        guard !pushWaiters.isEmpty else { return }
+        pushWaiters.removeFirst().resume()
+    }
+
+    private func resumeAllProducers() {
+        let pendingPushWaiters = pushWaiters
+        pushWaiters.removeAll()
+        for waiter in pendingPushWaiters {
+            waiter.resume()
         }
     }
 }

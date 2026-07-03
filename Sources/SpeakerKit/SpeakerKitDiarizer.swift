@@ -15,6 +15,7 @@ import ArgmaxCore
 public class SpeakerKitDiarizer: ModelManager, Diarizer, @unchecked Sendable {
     /// Performs diarization on the provided audio using the loaded models.
     public let diarize: ([Float], (any DiarizationOptions)?, (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult
+    public let diarizeAudioSource: (any SpeakerDiarizationAudioSource, (any DiarizationOptions)?, (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult
 
     /// - Parameters:
     ///   - loader: Backend-specific model loader.
@@ -25,17 +26,34 @@ public class SpeakerKitDiarizer: ModelManager, Diarizer, @unchecked Sendable {
     public init(
         loader: ModelLoader,
         downloader: ModelDownloader,
-        diarize: (([Float], (any DiarizationOptions)?, (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult)? = nil
+        diarize: (([Float], (any DiarizationOptions)?, (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult)? = nil,
+        diarizeAudioSource: ((any SpeakerDiarizationAudioSource, (any DiarizationOptions)?, (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult)? = nil
     ) {
+        let resolvedDiarize: ([Float], (any DiarizationOptions)?, (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult
         if let diarize {
-            self.diarize = diarize
+            resolvedDiarize = diarize
         } else if let pyannoteLoader = loader as? PyannoteModelLoader {
-            self.diarize = { audioArray, options, progressCallback in
+            resolvedDiarize = { audioArray, options, progressCallback in
                 let diarizer = try pyannoteLoader.makeDiarizer()
                 return try await diarizer.diarize(audioArray: audioArray, options: options, progressCallback: progressCallback)
             }
         } else {
             preconditionFailure("diarize closure must be provided for non-Pyannote loaders")
+        }
+        self.diarize = resolvedDiarize
+
+        if let diarizeAudioSource {
+            self.diarizeAudioSource = diarizeAudioSource
+        } else if let pyannoteLoader = loader as? PyannoteModelLoader {
+            self.diarizeAudioSource = { audioSource, options, progressCallback in
+                let diarizer = try pyannoteLoader.makeDiarizer()
+                return try await diarizer.diarize(audioSource: audioSource, options: options, progressCallback: progressCallback)
+            }
+        } else {
+            self.diarizeAudioSource = { audioSource, options, progressCallback in
+                let samples = try audioSource.readSamples(startSample: 0, endSample: audioSource.sampleCount)
+                return try await resolvedDiarize(samples, options, progressCallback)
+            }
         }
         super.init(loader: loader, downloader: downloader)
     }
@@ -50,5 +68,9 @@ public class SpeakerKitDiarizer: ModelManager, Diarizer, @unchecked Sendable {
 
     public func diarize(audioArray: [Float], options: (any DiarizationOptions)?, progressCallback: (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult {
         return try await diarize(audioArray, options, progressCallback)
+    }
+
+    public func diarize(audioSource: any SpeakerDiarizationAudioSource, options: (any DiarizationOptions)?, progressCallback: (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult {
+        return try await diarizeAudioSource(audioSource, options, progressCallback)
     }
 }

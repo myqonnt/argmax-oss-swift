@@ -38,4 +38,17 @@ public protocol Diarizer: Sendable {
         options: (any DiarizationOptions)?,
         progressCallback: (@Sendable (Progress) -> Void)?
     ) async throws -> DiarizationResult
+
+    /// Perform speaker diarization on a seekable audio source without loading the full file.
+    ///
+    /// - Parameters:
+    ///   - audioSource: Seekable 16 kHz mono audio source
+    ///   - options: Optional diarization configuration options
+    ///   - progressCallback: Optional callback for progress updates
+    /// - Returns: Diarization result with speaker segments
+    func diarize(
+        audioSource: any SpeakerDiarizationAudioSource,
+        options: (any DiarizationOptions)?,
+        progressCallback: (@Sendable (Progress) -> Void)?
+    ) async throws -> DiarizationResult
 }
