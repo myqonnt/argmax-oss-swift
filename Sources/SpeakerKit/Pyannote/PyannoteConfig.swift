@@ -46,9 +46,9 @@ public extension ModelInfo {
 @available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
 public class PyannoteConfig: SpeakerKitConfig, @unchecked Sendable {
     public var fullRedundancy: Bool
-    /// Number of concurrent segmenter inference workers. Defaults to 4.
+    /// Number of concurrent segmenter inference workers. Defaults to 1 for lower peak memory usage.
     public var concurrentSegmenterWorkers: Int
-    /// Number of concurrent embedder inference workers. `nil` uses the dynamic formula `min(8, max(2, audioSeconds / 30))`.
+    /// Number of concurrent embedder inference workers. `nil` uses 1 for lower peak memory usage.
     public var concurrentEmbedderWorkers: Int?
 
     public init(
@@ -58,13 +58,13 @@ public class PyannoteConfig: SpeakerKitConfig, @unchecked Sendable {
         verbose: Bool = true,
         logLevel: Logging.LogLevel = .info,
         fullRedundancy: Bool = true,
-        concurrentSegmenterWorkers: Int = 4,
+        concurrentSegmenterWorkers: Int = 1,
         concurrentEmbedderWorkers: Int? = nil,
         diarizer: (any Diarizer)? = nil
     ) {
         self.fullRedundancy = fullRedundancy
-        self.concurrentSegmenterWorkers = concurrentSegmenterWorkers
-        self.concurrentEmbedderWorkers = concurrentEmbedderWorkers
+        self.concurrentSegmenterWorkers = max(1, concurrentSegmenterWorkers)
+        self.concurrentEmbedderWorkers = concurrentEmbedderWorkers.map { max(1, $0) }
         super.init(
             modelDownloadConfig: modelDownloadConfig,
             download: download,
@@ -91,13 +91,13 @@ public class PyannoteConfig: SpeakerKitConfig, @unchecked Sendable {
         verbose: Bool = true,
         logLevel: Logging.LogLevel = .info,
         fullRedundancy: Bool = true,
-        concurrentSegmenterWorkers: Int = 4,
+        concurrentSegmenterWorkers: Int = 1,
         concurrentEmbedderWorkers: Int? = nil,
         diarizer: (any Diarizer)? = nil
     ) {
         self.fullRedundancy = fullRedundancy
-        self.concurrentSegmenterWorkers = concurrentSegmenterWorkers
-        self.concurrentEmbedderWorkers = concurrentEmbedderWorkers
+        self.concurrentSegmenterWorkers = max(1, concurrentSegmenterWorkers)
+        self.concurrentEmbedderWorkers = concurrentEmbedderWorkers.map { max(1, $0) }
         super.init(
             modelDownloadConfig: ModelDownloadConfig(
                 downloadBase: downloadBase,
@@ -208,4 +208,3 @@ public struct PyannoteDiarizationTimings: DiarizationTimings, CustomStringConver
         """
     }
 }
-

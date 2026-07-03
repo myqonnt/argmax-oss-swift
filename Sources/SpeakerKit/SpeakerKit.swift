@@ -70,6 +70,25 @@ open class SpeakerKit: @unchecked Sendable {
         return try await diarizer.diarize(audioArray: audioArray, options: options, progressCallback: progressCallback)
     }
 
+    /// Processes a seekable audio source and returns labeled speaker segments.
+    ///
+    /// If models are not yet loaded, this method loads them automatically before running inference.
+    /// Concurrent callers are safe.
+    ///
+    /// - Parameters:
+    ///   - audioSource: 16 kHz mono PCM source to diarize.
+    ///   - options: Diarization options. Nil uses the defaults.
+    ///   - progressCallback: Optional callback for progress updates.
+    /// - Returns: Labeled speaker segments with timings.
+    open func diarize(
+        audioSource: any SpeakerDiarizationAudioSource,
+        options: (any DiarizationOptions)? = nil,
+        progressCallback: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> DiarizationResult {
+        try await ensureModelsLoaded()
+        return try await diarizer.diarize(audioSource: audioSource, options: options, progressCallback: progressCallback)
+    }
+
     /// Builds RTTM lines from a diarization result, optionally aligned to a transcription.
     /// - Parameters:
     ///   - diarizationResult: Result from `diarize(audioArray:options:)`.

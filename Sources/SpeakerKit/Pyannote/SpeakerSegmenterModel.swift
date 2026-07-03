@@ -5,6 +5,53 @@
 import ArgmaxCore
 import WhisperKit
 
+private struct SegmenterChunk: Sendable {
+    let index: Int
+    let waveform: [Float]
+}
+
+private actor SegmenterChunkReader {
+    private let lowerBoundSample: Int
+    private let endConditionSample: Int
+    private let readEndLimitSample: Int
+    private let maxChunkLength: Int
+    private let chunkStrideOffset: Int
+    private let makeChunkIndex: @Sendable (Int) -> Int
+    private let readSamples: @Sendable (Int, Int) throws -> [Float]
+    private var chunkEndIndex: Int
+
+    init(
+        startSample: Int,
+        endConditionSample: Int,
+        readEndLimitSample: Int,
+        maxChunkLength: Int,
+        chunkStrideOffset: Int,
+        makeChunkIndex: @escaping @Sendable (Int) -> Int,
+        readSamples: @escaping @Sendable (Int, Int) throws -> [Float]
+    ) {
+        self.lowerBoundSample = startSample
+        self.endConditionSample = endConditionSample
+        self.readEndLimitSample = readEndLimitSample
+        self.maxChunkLength = maxChunkLength
+        self.chunkStrideOffset = chunkStrideOffset
+        self.makeChunkIndex = makeChunkIndex
+        self.readSamples = readSamples
+        self.chunkEndIndex = startSample
+    }
+
+    func next() async throws -> SegmenterChunk? {
+        guard chunkEndIndex < endConditionSample else { return nil }
+        try Task.checkCancellation()
+
+        let chunkStartIndex = max(chunkEndIndex - chunkStrideOffset, lowerBoundSample)
+        chunkEndIndex = min(chunkStartIndex + maxChunkLength, readEndLimitSample)
+        return SegmenterChunk(
+            index: makeChunkIndex(chunkStartIndex),
+            waveform: try readSamples(chunkStartIndex, chunkEndIndex)
+        )
+    }
+}
+
 @available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
 public class SpeakerSegmenterModel: @unchecked Sendable {
     public private(set) var modelURL: URL
@@ -28,7 +75,7 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
     ) async throws {
         self.computeUnits = computeUnits
         self.modelURL = modelURL
-        self.concurrentWorkers = concurrentWorkers
+        self.concurrentWorkers = max(1, concurrentWorkers)
         self.useFullRedundancy = useFullRedundancy
         self.sampleRate = sampleRate
 
@@ -125,6 +172,95 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
     ) async throws {
         defer { outputContinuation.finish() }
 
+        try await predict(audioArray: audioArray, windowPadding: windowPadding) { output in
+            outputContinuation.yield(output)
+        }
+    }
+
+    func predict(
+        audioArray: [Float],
+        windowPadding: Int = 0,
+        outputHandler: @escaping @Sendable (SpeakerSegmenterOutput) async -> Void
+    ) async throws {
+        let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
+        let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
+        let endConditionSample = max(0, audioArray.count - windowPadding)
+        let chunkReader = makeChunkReader(
+            startSample: 0,
+            endConditionSample: endConditionSample,
+            readEndLimitSample: audioArray.count,
+            maxChunkLength: maxChunkLength,
+            chunkStrideOffset: chunkStrideOffset
+        ) { startSample, endSample in
+            Array(audioArray[startSample..<endSample])
+        }
+
+        try await predict(
+            chunkReader: chunkReader,
+            audioLength: audioArray.count,
+            outputHandler: outputHandler,
+            maxChunkLength: maxChunkLength,
+            chunkStrideOffset: chunkStrideOffset
+        )
+    }
+
+    public func predict(
+        audioSource: any SpeakerDiarizationAudioSource,
+        startSample: Int,
+        endSample: Int,
+        outputContinuation: AsyncStream<SpeakerSegmenterOutput>.Continuation
+    ) async throws {
+        defer { outputContinuation.finish() }
+
+        try await predict(
+            audioSource: audioSource,
+            startSample: startSample,
+            endSample: endSample
+        ) { output in
+            outputContinuation.yield(output)
+        }
+    }
+
+    func predict(
+        audioSource: any SpeakerDiarizationAudioSource,
+        startSample: Int,
+        endSample: Int,
+        outputHandler: @escaping @Sendable (SpeakerSegmenterOutput) async -> Void
+    ) async throws {
+        guard audioSource.sampleRate == sampleRate else {
+            throw SpeakerKitError.invalidConfiguration("Expected \(sampleRate) Hz audio source, got \(audioSource.sampleRate) Hz")
+        }
+
+        let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
+        let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
+        let sourceStart = max(0, min(startSample, audioSource.sampleCount))
+        let sourceEnd = max(sourceStart, min(endSample, audioSource.sampleCount))
+        let chunkReader = makeChunkReader(
+            startSample: sourceStart,
+            endConditionSample: sourceEnd,
+            readEndLimitSample: sourceEnd,
+            maxChunkLength: maxChunkLength,
+            chunkStrideOffset: chunkStrideOffset
+        ) { startSample, endSample in
+            try audioSource.readSamples(startSample: startSample, endSample: endSample)
+        }
+
+        try await predict(
+            chunkReader: chunkReader,
+            audioLength: audioSource.sampleCount,
+            outputHandler: outputHandler,
+            maxChunkLength: maxChunkLength,
+            chunkStrideOffset: chunkStrideOffset
+        )
+    }
+
+    private func predict(
+        chunkReader: SegmenterChunkReader,
+        audioLength: Int,
+        outputHandler: @escaping @Sendable (SpeakerSegmenterOutput) async -> Void,
+        maxChunkLength: Int,
+        chunkStrideOffset: Int
+    ) async throws {
         guard let model else {
             throw SpeakerKitError.modelUnavailable("Speaker segmenter model is unavailable")
         }
@@ -135,40 +271,18 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
             Logging.debug(String(format: "[SpeakerKit] Total segmenter model inference time: %.2f ms", totalTime))
         }
 
-        var chunkEndIndex = 0
-        let audioArrayCount = audioArray.count
-        let maxIndex = audioArrayCount - windowPadding
-
-        let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
-
-        var chunks: [(index: Int, waveform: [Float])] = []
-        var chunkIndex = 0
-        let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
-        while chunkEndIndex < maxIndex {
-            let chunkStartIndex = max(chunkEndIndex - chunkStrideOffset, 0)
-            chunkEndIndex = min(chunkStartIndex + maxChunkLength, audioArrayCount)
-            let chunk = Array(audioArray[chunkStartIndex..<chunkEndIndex])
-            chunks.append((index: chunkIndex, waveform: chunk))
-            chunkIndex += 1
-        }
-        Logging.debug("[SpeakerSegmenter] split \(audioArrayCount) into \(chunkIndex) chunks with stride offset \(chunkStrideOffset)")
-
-        let chunkStream = AsyncStream<(index: Int, waveform: [Float])> { continuation in
-            for chunk in chunks {
-                continuation.yield(chunk)
-            }
-            continuation.finish()
-        }
+        Logging.debug("[SpeakerSegmenter] streaming \(audioLength) samples with stride offset \(chunkStrideOffset)")
 
         let modelSampleRate = modelSampleRate
         let workerCount = max(1, concurrentWorkers)
 
-        await withTaskGroup(of: Void.self) { taskGroup in
+        try await withThrowingTaskGroup(of: Void.self) { taskGroup in
             let sampleRateFloat = Float(sampleRate)
             let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
+
             for workerID in 0..<workerCount {
                 taskGroup.addTask { [model] in
-                    for await chunk in chunkStream {
+                    while let chunk = try await chunkReader.next() {
                         guard !Task.isCancelled else { break }
                         Logging.debug("[SpeakerSegmenter][\(workerID)] inferring chunk \(chunk.index) count: \(chunk.waveform.count)")
 
@@ -208,12 +322,44 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
                             )
                             Logging.debug("[SpeakerSegmenter][\(workerID)] inference for chunk \(chunk.index) encountered an error: \(error)")
                         }
-                        outputContinuation.yield(output)
+                        await outputHandler(output)
                     }
                     Logging.debug("[SpeakerSegmenter][\(workerID)] all chunks finished.")
                 }
             }
+
+            for try await _ in taskGroup {}
         }
+    }
+
+    private func makeChunkReader(
+        startSample: Int,
+        endConditionSample: Int,
+        readEndLimitSample: Int,
+        maxChunkLength: Int,
+        chunkStrideOffset: Int,
+        readSamples: @escaping @Sendable (Int, Int) throws -> [Float]
+    ) -> SegmenterChunkReader {
+        SegmenterChunkReader(
+            startSample: startSample,
+            endConditionSample: endConditionSample,
+            readEndLimitSample: readEndLimitSample,
+            maxChunkLength: maxChunkLength,
+            chunkStrideOffset: chunkStrideOffset,
+            makeChunkIndex: { startSample in
+                Self.makeChunkIndex(
+                    forStartSample: startSample,
+                    maxChunkLength: maxChunkLength,
+                    chunkStrideOffset: chunkStrideOffset
+                )
+            },
+            readSamples: readSamples
+        )
+    }
+
+    private static func makeChunkIndex(forStartSample startSample: Int, maxChunkLength: Int, chunkStrideOffset: Int) -> Int {
+        let stride = max(1, maxChunkLength - chunkStrideOffset)
+        return max(0, Int(round(Double(startSample) / Double(stride))))
     }
 
     func maxChunks(for audioLength: Int) -> Int {
@@ -322,4 +468,3 @@ fileprivate class NoOpMLFeatureProvider: MLFeatureProvider {
         nil
     }
 }
-
