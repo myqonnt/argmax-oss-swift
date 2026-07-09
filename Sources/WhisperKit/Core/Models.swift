@@ -660,6 +660,31 @@ public struct TranscriptionProgress: Sendable {
     }
 }
 
+/// Represents progress while WhisperKit loads or prewarms its CoreML models.
+public struct ModelLoadingProgress: Sendable {
+    public var state: ModelState
+    public var completedUnitCount: Int64
+    public var totalUnitCount: Int64
+    public var currentUnit: String?
+
+    public var fractionCompleted: Double {
+        guard totalUnitCount > 0 else { return 1.0 }
+        return min(1.0, max(0.0, Double(completedUnitCount) / Double(totalUnitCount)))
+    }
+
+    public init(
+        state: ModelState,
+        completedUnitCount: Int64,
+        totalUnitCount: Int64,
+        currentUnit: String? = nil
+    ) {
+        self.state = state
+        self.completedUnitCount = completedUnitCount
+        self.totalUnitCount = totalUnitCount
+        self.currentUnit = currentUnit
+    }
+}
+
 // Callbacks to receive state updates during transcription.
 
 /// A callback that provides transcription segments as they are discovered.
@@ -671,6 +696,8 @@ public typealias SegmentDiscoveryCallback = @Sendable (_ segments: [Transcriptio
 /// - Parameter state: The current `TranscriptionState` of the transcription process
 public typealias TranscriptionStateCallback = @Sendable (_ state: TranscriptionState) -> Void
 
+/// A callback that reports stage-level progress while models are loading or prewarming.
+public typealias ModelLoadingProgressCallback = @Sendable (_ progress: ModelLoadingProgress) -> Void
 
 /// A callback that reports incremental updates about the progress of a long‑running operation.
 ///

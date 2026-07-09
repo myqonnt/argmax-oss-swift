@@ -52,6 +52,7 @@ open class WhisperKit {
     public var segmentDiscoveryCallback: SegmentDiscoveryCallback?
     public var modelStateCallback: ModelStateCallback?
     public var transcriptionStateCallback: TranscriptionStateCallback?
+    public var modelLoadingProgressCallback: ModelLoadingProgressCallback?
 
     public init(_ config: WhisperKitConfig = WhisperKitConfig()) async throws {
         modelCompute = config.computeOptions ?? ModelComputeOptions()
@@ -68,6 +69,7 @@ open class WhisperKit {
         voiceActivityDetector = config.voiceActivityDetector
         tokenizerFolder = config.tokenizerFolder ?? config.downloadBase
         useBackgroundDownloadSession = config.useBackgroundDownloadSession
+        modelLoadingProgressCallback = config.modelLoadingProgressCallback
         currentTimings = TranscriptionTimings()
         Logging.updateLogLevel(config.verbose ? config.logLevel : .none)
 
@@ -83,13 +85,13 @@ open class WhisperKit {
 
         if let prewarm = config.prewarm, prewarm {
             Logging.info("Prewarming models...")
-            try await prewarmModels()
+            try await prewarmModels(progressCallback: config.modelLoadingProgressCallback)
         }
 
         // If load is not passed in, load based on whether a modelFolder is passed
         if config.load ?? (config.modelFolder != nil) {
             Logging.info("Loading models...")
-            try await loadModels()
+            try await loadModels(progressCallback: config.modelLoadingProgressCallback)
         }
     }
 
@@ -111,7 +113,8 @@ open class WhisperKit {
         prewarm: Bool? = nil,
         load: Bool? = nil,
         download: Bool = true,
-        useBackgroundDownloadSession: Bool = false
+        useBackgroundDownloadSession: Bool = false,
+        modelLoadingProgressCallback: ModelLoadingProgressCallback? = nil
     ) async throws {
         let config = WhisperKitConfig(
             model: model,
@@ -131,7 +134,8 @@ open class WhisperKit {
             prewarm: prewarm,
             load: load,
             download: download,
-            useBackgroundDownloadSession: useBackgroundDownloadSession
+            useBackgroundDownloadSession: useBackgroundDownloadSession,
+            modelLoadingProgressCallback: modelLoadingProgressCallback
         )
         try await self.init(config)
     }
@@ -355,10 +359,30 @@ open class WhisperKit {
         try await loadModels(prewarmMode: true)
     }
 
+    open func prewarmModels(
+        progressCallback: ModelLoadingProgressCallback?
+    ) async throws {
+        try await loadModels(prewarmMode: true, progressCallback: progressCallback)
+    }
+
     open func loadModels(
         prewarmMode: Bool = false
     ) async throws {
+        try await loadModels(prewarmMode: prewarmMode, progressCallback: nil)
+    }
+
+    open func loadModels(
+        progressCallback: ModelLoadingProgressCallback?
+    ) async throws {
+        try await loadModels(prewarmMode: false, progressCallback: progressCallback)
+    }
+
+    open func loadModels(
+        prewarmMode: Bool,
+        progressCallback: ModelLoadingProgressCallback?
+    ) async throws {
         modelState = prewarmMode ? .prewarming : .loading
+        let progressCallback = progressCallback ?? modelLoadingProgressCallback
 
         let modelLoadStart = CFAbsoluteTimeGetCurrent()
 
@@ -379,24 +403,55 @@ open class WhisperKit {
             }
         }
 
+        let loadUnits = [
+            (featureExtractor as? WhisperMLModel) == nil ? nil : "Mel Spectrogram",
+            (textDecoder as? WhisperMLModel) == nil ? nil : "Text Decoder",
+            (audioEncoder as? WhisperMLModel) == nil ? nil : "Audio Encoder",
+            (prewarmMode || tokenizer != nil) ? nil : "Tokenizer",
+        ].compactMap { $0 }
+        let totalUnitCount = Int64(loadUnits.count)
+        var completedUnitCount: Int64 = 0
+
+        func nextUnit() -> String? {
+            let index = Int(completedUnitCount)
+            return loadUnits.indices.contains(index) ? loadUnits[index] : nil
+        }
+
+        func reportProgress(currentUnit: String?) {
+            progressCallback?(ModelLoadingProgress(
+                state: modelState,
+                completedUnitCount: completedUnitCount,
+                totalUnitCount: totalUnitCount,
+                currentUnit: currentUnit
+            ))
+        }
+
+        reportProgress(currentUnit: nextUnit())
+
         if let featureExtractor = featureExtractor as? WhisperMLModel {
             Logging.debug("Loading feature extractor")
+            reportProgress(currentUnit: "Mel Spectrogram")
             try await featureExtractor.loadModel(
                 at: logmelUrl,
                 computeUnits: modelCompute.melCompute, // hardcoded to use GPU
                 prewarmMode: prewarmMode
             )
+            completedUnitCount += 1
+            reportProgress(currentUnit: nextUnit())
             Logging.debug("Loaded feature extractor")
         }
 
         if let textDecoder = textDecoder as? WhisperMLModel {
             Logging.debug("Loading text decoder")
             let decoderLoadStart = CFAbsoluteTimeGetCurrent()
+            reportProgress(currentUnit: "Text Decoder")
             try await textDecoder.loadModel(
                 at: decoderUrl,
                 computeUnits: modelCompute.textDecoderCompute,
                 prewarmMode: prewarmMode
             )
+            completedUnitCount += 1
+            reportProgress(currentUnit: nextUnit())
 
             if prewarmMode {
                 currentTimings.decoderSpecializationTime = CFAbsoluteTimeGetCurrent() - decoderLoadStart
@@ -411,11 +466,14 @@ open class WhisperKit {
             Logging.debug("Loading audio encoder")
             let encoderLoadStart = CFAbsoluteTimeGetCurrent()
 
+            reportProgress(currentUnit: "Audio Encoder")
             try await audioEncoder.loadModel(
                 at: encoderUrl,
                 computeUnits: modelCompute.audioEncoderCompute,
                 prewarmMode: prewarmMode
             )
+            completedUnitCount += 1
+            reportProgress(currentUnit: nextUnit())
 
             if prewarmMode {
                 currentTimings.encoderSpecializationTime = CFAbsoluteTimeGetCurrent() - encoderLoadStart
@@ -429,12 +487,20 @@ open class WhisperKit {
         if prewarmMode {
             modelState = .prewarmed
             currentTimings.prewarmLoadTime = CFAbsoluteTimeGetCurrent() - modelLoadStart
+            reportProgress(currentUnit: nil)
             return
         }
 
+        if tokenizer == nil {
+            reportProgress(currentUnit: "Tokenizer")
+        }
         try await loadTokenizerIfNeeded()
+        if loadUnits.contains("Tokenizer") {
+            completedUnitCount += 1
+        }
 
         modelState = .loaded
+        reportProgress(currentUnit: nil)
 
         currentTimings.modelLoading = CFAbsoluteTimeGetCurrent() - modelLoadStart + currentTimings.prewarmLoadTime
 
