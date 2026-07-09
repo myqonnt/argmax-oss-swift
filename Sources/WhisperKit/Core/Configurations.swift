@@ -71,6 +71,8 @@ open class WhisperKitConfig {
     public var download: Bool
     /// Use background download session
     public var useBackgroundDownloadSession: Bool
+    /// Receive stage-level progress while CoreML models are prewarming or loading
+    public var modelLoadingProgressCallback: ModelLoadingProgressCallback?
 
     public init(model: String? = nil,
                 downloadBase: URL? = nil,
@@ -93,7 +95,8 @@ open class WhisperKitConfig {
                 prewarm: Bool? = nil,
                 load: Bool? = nil,
                 download: Bool = true,
-                useBackgroundDownloadSession: Bool = false)
+                useBackgroundDownloadSession: Bool = false,
+                modelLoadingProgressCallback: ModelLoadingProgressCallback? = nil)
     {
         self.model = model
         self.downloadBase = downloadBase
@@ -117,6 +120,7 @@ open class WhisperKitConfig {
         self.load = load
         self.download = download
         self.useBackgroundDownloadSession = useBackgroundDownloadSession
+        self.modelLoadingProgressCallback = modelLoadingProgressCallback
     }
 }
 

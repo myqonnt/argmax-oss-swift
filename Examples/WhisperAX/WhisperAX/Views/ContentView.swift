@@ -62,6 +62,7 @@ struct ContentView: View {
 
     @State private var loadingProgressValue: Float = 0.0
     @State private var specializationProgressRatio: Float = 0.7
+    @State private var loadingProgressDescription: String = ""
     @State private var isFilePickerPresented = false
     @State private var modelLoadingTime: TimeInterval = 0
     @State private var firstTokenTime: TimeInterval = 0
@@ -597,6 +598,11 @@ struct ContentView: View {
                                 .frame(maxWidth: .infinity)
 
                             Text(String(format: "%.1f%%", loadingProgressValue * 100))
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                        if !loadingProgressDescription.isEmpty {
+                            Text(loadingProgressDescription)
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }
@@ -1355,6 +1361,18 @@ struct ContentView: View {
 
         whisperKit = nil
         Task {
+            let updateLoadingProgress: @Sendable (ModelLoadingProgress, Float, Float) -> Void = { progress, start, end in
+                Task { @MainActor in
+                    loadingProgressValue = start + Float(progress.fractionCompleted) * (end - start)
+                    modelState = progress.state
+                    if let currentUnit = progress.currentUnit {
+                        loadingProgressDescription = "\(progress.state.description) \(currentUnit)..."
+                    } else {
+                        loadingProgressDescription = progress.state.description
+                    }
+                }
+            }
+
             let config = WhisperKitConfig(computeOptions: getComputeOptions(),
                                           verbose: true,
                                           logLevel: .debug,
@@ -1379,6 +1397,7 @@ struct ContentView: View {
                     DispatchQueue.main.async {
                         loadingProgressValue = Float(progress.fractionCompleted) * specializationProgressRatio
                         modelState = .downloading
+                        loadingProgressDescription = "Downloading \(model)..."
                     }
                 })
             }
@@ -1386,28 +1405,26 @@ struct ContentView: View {
             await MainActor.run {
                 loadingProgressValue = specializationProgressRatio
                 modelState = .downloaded
+                loadingProgressDescription = "Downloaded \(model)"
             }
 
             if let modelFolder = folder {
                 whisperKit.modelFolder = modelFolder
 
                 await MainActor.run {
-                    // Set the loading progress to 90% of the way after prewarm
                     loadingProgressValue = specializationProgressRatio
                     modelState = .prewarming
-                }
-
-                let progressBarTask = Task {
-                    await updateProgressBar(targetProgress: 0.9, maxTime: 240)
+                    loadingProgressDescription = "Preparing to specialize \(selectedModel)..."
                 }
 
                 // Prewarm models
+                let prewarmProgressStart = specializationProgressRatio
                 do {
-                    try await whisperKit.prewarmModels()
-                    progressBarTask.cancel()
+                    try await whisperKit.prewarmModels { progress in
+                        updateLoadingProgress(progress, prewarmProgressStart, 0.9)
+                    }
                 } catch {
                     print("Error prewarming models, retrying: \(error.localizedDescription)")
-                    progressBarTask.cancel()
                     if !redownload {
                         loadModel(model, redownload: true)
                         return
@@ -1419,12 +1436,14 @@ struct ContentView: View {
                 }
 
                 await MainActor.run {
-                    // Set the loading progress to 90% of the way after prewarm
-                    loadingProgressValue = specializationProgressRatio + 0.9 * (1 - specializationProgressRatio)
+                    loadingProgressValue = 0.9
                     modelState = .loading
+                    loadingProgressDescription = "Preparing to load \(selectedModel)..."
                 }
 
-                try await whisperKit.loadModels()
+                try await whisperKit.loadModels { progress in
+                    updateLoadingProgress(progress, 0.9, 1.0)
+                }
 
                 await MainActor.run {
                     if !localModels.contains(model) {
@@ -1434,6 +1453,7 @@ struct ContentView: View {
                     availableLanguages = Constants.languages.map { $0.key }.sorted()
                     loadingProgressValue = 1.0
                     modelState = whisperKit.modelState
+                    loadingProgressDescription = ""
                 }
             }
 
