@@ -78,3 +78,12 @@ fastlane/upload_folder
 *.swiftdeps
 *.swiftmodule
 *.swiftdoc
+
+.claude-plugin/
+.idea/
+labels/
+sessions/
+statuses/
+config.json
+events.jsonl
+views.json
