@@ -564,6 +564,9 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
         // Single loop variables
         var timings = TranscriptionTimings()
         let initialPromptIndex = decoderInputs.initialPrompt.count
+        // 词级字幕从 SOT 开始计数；prompt 位于 SOT 之前，不能占用对齐矩阵的行。
+        // 必须读取实际 prefill 序列，覆盖提示裁剪、过滤和语言检测重建后的情况。
+        let alignmentOffset = decoderInputs.initialPrompt.firstIndex(of: tokenizer.specialTokens.startOfTranscriptToken) ?? 0
         var currentTokens: [Int] = decoderInputs.initialPrompt
         var nextToken: Int = lastPromptToken
         var logProbs: [Float] = Array(repeating: 0, count: currentTokens.count)
@@ -722,12 +725,13 @@ open class TextDecoder: TextDecoding, WhisperMLModel {
                 decoderInputs.kvCacheUpdateMask[tokenIndex + 1] = 1
 
                 // Update alignment weights for token if present
-                if let newAlignmentWeights = decoderOutput.cache?.alignmentWeights {
+                let alignmentIndex = tokenIndex - alignmentOffset
+                if alignmentIndex >= 0, let newAlignmentWeights = decoderOutput.cache?.alignmentWeights {
                     hasAlignment = true
                     TextDecoder.updateAlignmentWeights(
                         alignmentTensor: decoderInputs.alignmentWeights,
                         alignmentSlice: newAlignmentWeights,
-                        insertAtIndex: tokenIndex
+                        insertAtIndex: alignmentIndex
                     )
                 }
 

@@ -417,6 +417,8 @@ final class MockTextDecoder: TextDecoder {
     /// The last entry repeats if the decode loop runs longer than the script.
     var script: [Prediction] = []
     private(set) var predictionCount = 0
+    /// Emit a distinct value per prediction to verify alignment row indexing.
+    var emitsAlignmentWeights = false
 
     private let vocabSize = 1024
 
@@ -442,7 +444,9 @@ final class MockTextDecoder: TextDecoder {
         let cache = DecodingCache(
             keyCache: try MLMultiArray(shape: [1, 2, 1, 1], dataType: .float16, initialValue: FloatType(0)),
             valueCache: try MLMultiArray(shape: [1, 2, 1, 1], dataType: .float16, initialValue: FloatType(0)),
-            alignmentWeights: nil
+            alignmentWeights: emitsAlignmentWeights
+                ? try MLMultiArray(shape: [1, 1500], dataType: .float16, initialValue: FloatType(predictionCount))
+                : nil
         )
         return TextDecoderMLMultiArrayOutputType(logits: logits, cache: cache)
     }
